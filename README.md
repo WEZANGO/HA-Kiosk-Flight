@@ -41,10 +41,17 @@ tiles, no SDK, no external requests from the kiosk.
   (count 129 px → 258 px, callsign 24.8 px → 49.7 px, compass 21 → 41, all exactly 2×), and
   the whole round trip through the admin modal (slide → save → reopen → values and readouts
   restored → display renders with them).
-* The home-marker ripple used to end its loop at opacity 0 and restart at 0.9, i.e. one frame
-  of full opacity per cycle (a visible twinkle). Opacity is now 0 at both ends and the ripple
-  is scale-based instead of width/height (no relayout per frame). Sampling a whole cycle in
-  the live page: peak 0.79, largest single-step change 0.18, and a wrap flash would be ~0.8.
+* The home-marker ripple twitched at its **outer full width** just before restarting. Cause:
+  the expansion animated `width/height/margin` — layout properties — so at the loop boundary
+  the fresh (tiny) geometry could paint a frame late while the ring was visible again, showing
+  the previous 190 px ring brightly; the old keyframes also started at `opacity: .9` on top of a
+  base state of `opacity: 1`. Stepping the animation's clock across the boundary with a
+  one-frame geometry lag modelled: the old keyframes produce **8 such frames (96 px radius at
+  opacity 1)**, the current ones **0** (worst case 96 px at opacity 0.03 — invisible). The
+  ripple now expands via a composited `transform`, uses `animation-fill-mode: both` with an
+  invisible base state, and holds `opacity: 0` for the first 10% of each cycle so any lagging
+  frame lands in an invisible window. Frame-level captures (real compositor frames across the
+  boundary) show no transient: max inter-frame luminance change 1.3 against a background of 11.
 * Screenshots at 1920×1080, 1080×1920 and 3840×2160, plus the admin modal, the
   unsaved-settings preview and the aircraft detail tap.
 
