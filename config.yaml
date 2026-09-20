@@ -1,0 +1,33 @@
+name: Kiosk Flight Displays
+version: 0.1.0
+slug: kiosk_flight_displays
+description: Full-screen kiosk displays of the aircraft flying over your house, read from Home Assistant's Flightradar24 integration.
+url: https://github.com/example/kiosk-flight-displays
+arch:
+  - aarch64
+  - amd64
+  - armv7
+  - armhf
+  - i386
+startup: application
+init: false
+ingress: true
+ingress_port: 8096
+panel_icon: mdi:airplane
+panel_title: Kiosk Flight
+# Reading the Flightradar24 sensor (and zone.home) uses the Supervisor API
+# proxy, which needs this permission rather than a long-lived user token.
+homeassistant_api: true
+ports:
+  8096/tcp: 8096
+ports_description:
+  8096/tcp: Direct access for an iframe when Home Assistant ingress is unavailable
+options:
+  flight_entity: sensor.flightradar24_current_in_area
+  home_latitude: 0
+  home_longitude: 0
+schema:
+  flight_entity: str
+  home_latitude: float
+  home_longitude: float
+backup: hot

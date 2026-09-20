@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Flights overhead</title>
+<!--
+  Kiosk Flight display. Everything is local: no map tiles, no SDK, no images, no
+  web fonts, no external requests of any kind. Aircraft positions arrive from the
+  app as polar coordinates (bearing + km from the centre), already converted
+  server-side, so this page only plots and labels them.
+  Keep this script conservative (ES2017 at most): an unsupported operator kills
+  the whole script on an old kiosk WebView, not just the line it is on.
+-->
+<style>
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#05080f;
+    color:#e8f1ff;font-family:system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif}
+  /* Night-sky wash + vignette: the numbers float over the map, nothing is boxed. */
+  #stage{position:fixed;inset:0;
+    background:
+      radial-gradient(120% 120% at 50% 50%, rgba(56,189,248,.07) 0%, rgba(5,8,15,0) 55%),
+      radial-gradient(140% 140% at 50% 50%, rgba(5,8,15,0) 45%, rgba(2,4,9,.92) 100%),
+      linear-gradient(180deg,#070c16 0%,#04070d 60%,#03050a 100%)}
+  #radar{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%)}
+  #grid,#trails{position:absolute;left:0;top:0}
+  #plots{position:absolute;left:0;top:0;width:100%;height:100%}
+  #sweep{position:absolute;left:0;top:0;width:100%;height:100%;
+    animation:sweep 7s linear infinite;opacity:.5;pointer-events:none}
+  #sweep.off{display:none}
+  @keyframes sweep{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+  .ring{fill:none;stroke:rgba(148,197,255,.16);stroke-width:1}
+  .ring.major{stroke:rgba(148,197,255,.22)}
+  .tick{stroke:rgba(148,197,255,.28);stroke-width:1}
+  .card{fill:rgba(200,225,255,.5);stroke:none;letter-spacing:.14em;
+    font-family:ui-monospace,Menlo,Consolas,monospace;text-anchor:middle}
+  .rlabel{fill:rgba(148,197,255,.42);stroke:none;
+    font-family:ui-monospace,Menlo,Consolas,monospace}
+  .cosmetic{fill:none;stroke:rgba(148,197,255,.10);stroke-width:1;stroke-dasharray:2 10}
+  #home{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);pointer-events:none}
+  .home-dot{width:11px;height:11px;border-radius:50%;background:#eaf6ff;margin:0 auto;
+    box-shadow:0 0 0 3px rgba(125,211,252,.25),0 0 18px rgba(125,211,252,.75)}
+  .home-pulse{position:absolute;left:50%;top:50%;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;
+    border-radius:50%;border:1px solid rgba(125,211,252,.55);animation:pulse 4.5s ease-out infinite}
+  @keyframes pulse{0%{width:11px;height:11px;margin:-5.5px 0 0 -5.5px;opacity:.9}
+    100%{width:190px;height:190px;margin:-95px 0 0 -95px;opacity:0}}
+  .home-tag{position:absolute;left:50%;top:100%;transform:translate(-50%,6px);white-space:nowrap;
+    font-size:11px;letter-spacing:.2em;color:rgba(200,225,255,.45);
+    font-family:ui-monospace,Menlo,Consolas,monospace}
+  #home.quiet .home-tag{display:none}
+  .ac{position:absolute;transform:translate(-50%,-50%)}
+  .glyph{width:34px;height:34px;display:block;transform-origin:50% 50%}
+  .glyph path{fill:#9fd8ff;stroke:rgba(3,10,20,.55);stroke-width:.5}
+  .ac.near .glyph path{fill:#eaf9ff}
+  .ac.near .glyph{filter:drop-shadow(0 0 7px rgba(160,220,255,.85))}
+  .ac .tag{position:absolute;top:50%;white-space:nowrap;line-height:1.25;
+    text-shadow:0 0 6px rgba(0,0,0,.95),0 0 14px rgba(0,0,0,.9)}
+  /* The label's side is decided per aircraft in JS and set inline, so no side class
+     here: leaving both left: and right: applicable would stretch the box instead. */
+  .call{display:block;font-weight:700;letter-spacing:.02em;font-size:2.5vmin;color:#f2f9ff;
+    font-family:ui-monospace,Menlo,Consolas,monospace}
+  .meta{display:block;font-size:1.85vmin;color:#a8cde8;
+    font-family:ui-monospace,Menlo,Consolas,monospace}
+  .route{display:block;font-size:1.7vmin;color:#7fa8c8;letter-spacing:.04em}
+  .trend{font-weight:700}
+  .trend.climb{color:#7ff0b0}.trend.descent{color:#ffcf8a}
+  .trail{fill:none;stroke:#7dd3fc;stroke-width:1.6;stroke-opacity:.35;stroke-linejoin:round;
+    stroke-linecap:round}
+  #hud{position:absolute;left:4vmin;top:4vmin;max-width:44vmin;pointer-events:none}
+  #count{font-size:13vmin;line-height:.86;font-weight:200;letter-spacing:-.02em;
+    font-family:ui-monospace,Menlo,Consolas,monospace;color:#f4fbff;
+    text-shadow:0 0 30px rgba(125,211,252,.35)}
+  #hud-title{font-size:2.1vmin;letter-spacing:.34em;color:#8fb6d4;margin-top:.6vmin}
+  #hud-sub{font-size:1.9vmin;color:#9fc4dd;margin-top:1.4vmin;line-height:1.5}
+  #hud-sub b{color:#e9f6ff;font-weight:600}
+  #hud-warn{font-size:1.75vmin;color:#ffcf8a;margin-top:1vmin}
+  #notice{position:absolute;left:50%;top:50%;transform:translate(-50%,9vmin);text-align:center;
+    max-width:70vmin;pointer-events:none}
+  #notice .big{font-size:3vmin;letter-spacing:.28em;color:#dcecf8}
+  #notice .small{font-size:1.9vmin;color:#7fa8c8;margin-top:1.4vmin;line-height:1.6}
+  #notice.error{transform:translate(-50%,-50%)}
+  #notice.error .big{font-size:2.6vmin;letter-spacing:.1em;color:#ffd7a1;font-family:inherit}
+  #notice.error .small{color:#e3b98a}
+  #foot{position:absolute;left:4vmin;right:4vmin;bottom:3vmin;display:flex;gap:2vmin;
+    align-items:baseline;font-size:1.6vmin;color:#9dc0d8;
+    font-family:ui-monospace,Menlo,Consolas,monospace}
+  #foot .grow{flex:1}
+  #bar{position:absolute;left:0;bottom:0;height:3px;width:0;background:#7dd3fc;opacity:.75}
+  #bar.run{animation:grow linear forwards}
+  @keyframes grow{from{width:0}to{width:100%}}
+  /* Vignette, never a panel: dims whatever the detail block would otherwise sit on. */
+  #scrim{position:absolute;left:0;right:0;bottom:0;height:28vmin;pointer-events:none;opacity:0;
+    transition:opacity .25s ease;background:linear-gradient(180deg,
+      rgba(3,6,12,0) 0%,rgba(3,6,12,.72) 40%,rgba(3,6,12,.94) 100%)}
+  #scrim.on{opacity:1}
+  #detail{position:absolute;left:50%;bottom:7vmin;transform:translate(-50%,0);padding:0;
+    pointer-events:none;text-align:center;text-shadow:0 0 8px rgba(0,0,0,.95)}
+  #detail .d-call{font-size:4.2vmin;font-weight:700;letter-spacing:.03em;
+    font-family:ui-monospace,Menlo,Consolas,monospace;color:#ffffff}
+  #detail .d-route{font-size:2.2vmin;color:#bcd9ee;margin-top:.6vmin}
+  #detail .d-rows{font-size:1.7vmin;color:#b8d4e8;margin-top:1.4vmin;line-height:1.8;
+    font-family:ui-monospace,Menlo,Consolas,monospace}
+  #detail .d-rows span{margin:0 1.4vmin}
+  @media (max-aspect-ratio:1/1){#hud{max-width:80vmin}#count{font-size:9vmin}}
+  /* Respect reduced-motion (and settle quickly when a page is captured headlessly). */
+  @media (prefers-reduced-motion:reduce){
+    #sweep{animation:none;opacity:.3}
+    .home-pulse{animation:none;opacity:0}
+    #bar.run{animation:none;width:100%}
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="radar">
+    <svg id="grid" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div id="sweep"><svg xmlns="http://www.w3.org/2000/svg"><defs>
+      <linearGradient id="swg" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0%" stop-color="#7dd3fc" stop-opacity="0"/>
+        <stop offset="100%" stop-color="#7dd3fc" stop-opacity=".30"/>
+      </linearGradient></defs>
+      <path id="swpath" fill="url(#swg)"></path>
+      <line id="swline" stroke="#bfe9ff" stroke-width="1.2" stroke-opacity=".55"/></svg></div>
+    <svg id="trails" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div id="plots"></div>
+    <div id="home"><div class="home-pulse"></div><div class="home-dot"></div>
+      <div class="home-tag">HOME</div></div>
+    <div id="notice" hidden><div class="big"></div><div class="small"></div></div>
+  </div>
+</div>
+<div id="hud"><div id="count">0</div><div id="hud-title">AIRCRAFT OVERHEAD</div>
+  <div id="hud-sub"></div><div id="hud-warn"></div></div>
+<div id="foot"><span id="foot-left"></span><span class="grow"></span><span id="foot-right"></span></div>
+<div id="bar"></div>
+<div id="scrim"></div>
+<div id="detail" hidden><div class="d-call"></div><div class="d-route"></div>
+  <div class="d-rows"></div></div>
+<script>
+(function () {
+  var CFG = window.KIOSK_FLIGHT_CONFIG || {};
+  var DATA = window.KIOSK_FLIGHT_DATA || null;
+
+  function text(value, fallback) {
+    return (value === undefined || value === null || value === '') ? (fallback || '') : String(value);
+  }
+  function on(value) { return String(value) !== 'false'; }
+  function num(value) {
+    var n = parseFloat(value);
+    return isFinite(n) ? n : null;
+  }
+  function group(value) {
+    var whole = String(Math.round(value));
+    var out = '';
+    while (whole.length > 3) { out = ',' + whole.slice(-3) + out; whole = whole.slice(0, -3); }
+    return whole + out;
+  }
+  function deg(value) { return value === null ? '' : String(Math.round(value)); }
+
+  var UNITS = {
+    metric:   { dist: 'km', distFactor: 1,        alt: 'm',  altFactor: 0.3048, speed: 'km/h', speedFactor: 1.852 },
+    aviation: { dist: 'nm', distFactor: 0.539957, alt: 'ft', altFactor: 1,      speed: 'kt',   speedFactor: 1 },
+    imperial: { dist: 'mi', distFactor: 0.621371, alt: 'ft', altFactor: 1,      speed: 'mph',  speedFactor: 1.15078 }
+  };
+  var U = UNITS[text(CFG.units, 'metric')] || UNITS.metric;
+
+  function distance(km) {
+    if (km === null) { return ''; }
+    return (km * U.distFactor).toFixed(km * U.distFactor < 10 ? 1 : 0) + ' ' + U.dist;
+  }
+  function altitude(feet) {
+    if (feet === null) { return ''; }
+    var value = feet * U.altFactor;
+    if (U.alt === 'ft') { return group(value / 100) + '00 ft'; }
+    return group(value) + ' m';
+  }
+  function speed(knots) {
+    if (knots === null) { return ''; }
+    return group(knots * U.speedFactor) + ' ' + U.speed;
+  }
+
+  var radar = document.getElementById('radar');
+  var grid = document.getElementById('grid');
+  var trailLayer = document.getElementById('trails');
+  var plots = document.getElementById('plots');
+  var sweep = document.getElementById('sweep');
+  var countEl = document.getElementById('count');
+  var titleEl = document.getElementById('hud-title');
+  var subEl = document.getElementById('hud-sub');
+  var warnEl = document.getElementById('hud-warn');
+  var notice = document.getElementById('notice');
+  var footLeft = document.getElementById('foot-left');
+  var footRight = document.getElementById('foot-right');
+  var bar = document.getElementById('bar');
+  var detail = document.getElementById('detail');
+
+  var size = 600;          // radar square, in px
+  var centre = { x: 300, y: 300 };
+  var viewKm = 5;
+  var planes = [];         // placed plot nodes, for hit-testing
+  var gridObstacles = [];  // compass letters + range labels, measured while drawing
+  var gridBearing = 45;    // diagonal the range labels are currently drawn on
+  var selected = -1;
+  var refreshSeconds = Math.max(5, num(CFG.refreshInterval) || 20);
+  var timer = null;
+
+  function layout() {
+    var w = window.innerWidth || document.documentElement.clientWidth;
+    var h = window.innerHeight || document.documentElement.clientHeight;
+    size = Math.max(220, Math.round(Math.min(w, h) * 0.94));
+    radar.style.width = size + 'px';
+    radar.style.height = size + 'px';
+    centre = { x: size / 2, y: size / 2 };
+    grid.setAttribute('width', size);
+    grid.setAttribute('height', size);
+    trailLayer.setAttribute('width', size);
+    trailLayer.setAttribute('height', size);
+    document.getElementById('swpath').setAttribute('d', wedgePath());
+    document.getElementById('swline').setAttribute('x1', centre.x);
+    document.getElementById('swline').setAttribute('y1', centre.y);
+    document.getElementById('swline').setAttribute('x2', centre.x);
+    document.getElementById('swline').setAttribute('y2', 0);
+  }
+
+  function wedgePath() {
+    var radius = size / 2 - 2;
+    var span = 52 * Math.PI / 180;             // degrees of trailing tint
+    var start = -Math.PI / 2;                  // straight up
+    var x2 = centre.x + radius * Math.sin(start + span);
+    var y2 = centre.y - radius * Math.cos(start + span);
+    return 'M ' + centre.x + ' ' + centre.y + ' L ' + centre.x + ' ' + (centre.y - radius)
+      + ' A ' + radius + ' ' + radius + ' 0 0 1 ' + x2.toFixed(1) + ' ' + y2.toFixed(1) + ' Z';
+  }
+
+  // Polar -> screen: north up, bearing clockwise.
+  function project(bearing, km) {
+    var radius = size / 2 - 6;
+    var r = viewKm > 0 ? Math.min(1, km / viewKm) * radius : 0;
+    var rad = bearing * Math.PI / 180;
+    return { x: centre.x + r * Math.sin(rad), y: centre.y - r * Math.cos(rad) };
+  }
+
+  function svgNode(name, attrs) {
+    var node = document.createElementNS('http://www.w3.org/2000/svg', name);
+    for (var key in attrs) { if (attrs.hasOwnProperty(key)) { node.setAttribute(key, attrs[key]); } }
+    return node;
+  }
+
+  function drawGrid(rings, bearing) {
+    grid.innerHTML = '';
+    gridObstacles = [];
+    gridBearing = bearing;
+    var radius = size / 2 - 6;
+    // SVG text does not follow the CSS viewport units used elsewhere, so the
+    // scale-dependent grid labels are sized from the radar itself here.
+    var cardFont = Math.max(14, Math.round(size / 45));
+    var ringFont = Math.max(12, Math.round(size / 60));
+    var showRings = on(CFG.showRings);
+    if (showRings) {
+      for (var i = 0; i < rings.length; i++) {
+        var r = radius * Math.min(1, rings[i] / viewKm);
+        grid.appendChild(svgNode('circle', { 'class': 'ring' + (i === rings.length - 1 ? ' major' : ''),
+          cx: centre.x, cy: centre.y, r: r.toFixed(1) }));
+        // Range labels sit on the diagonal furthest from the traffic (see
+        // ringLabelBearings), so they never have to share space with a callsign.
+        var at = project(bearing, rings[i]);
+        var label = svgNode('text', { 'class': 'rlabel', 'font-size': ringFont,
+          x: (at.x + 6).toFixed(1), y: (at.y + 4).toFixed(1), 'text-anchor': 'start' });
+        label.textContent = distance(rings[i]);
+        grid.appendChild(label);
+        noteGridText(label, 2);
+      }
+    }
+    // Outer boundary + cardinal ticks.
+    grid.appendChild(svgNode('circle', { 'class': 'cosmetic', cx: centre.x, cy: centre.y, r: radius }));
+    var cardinals = [['N', 0], ['E', 90], ['S', 180], ['W', 270]];
+    for (var c = 0; c < cardinals.length; c++) {
+      var bearing = cardinals[c][1];
+      var outer = project(bearing, viewKm * 0.99);
+      var inner = project(bearing, viewKm * 0.93);
+      grid.appendChild(svgNode('line', { 'class': 'tick', x1: inner.x.toFixed(1), y1: inner.y.toFixed(1),
+        x2: outer.x.toFixed(1), y2: outer.y.toFixed(1) }));
+      var at = project(bearing, viewKm * 0.965);
+      var node = svgNode('text', { 'class': 'card', 'font-size': cardFont,
+        x: at.x.toFixed(1), y: (at.y + cardFont * 0.34).toFixed(1) });
+      node.textContent = cardinals[c][0];
+      grid.appendChild(node);
+      noteGridText(node, 6);
+    }
+  }
+
+  // Grid text is a real obstacle for aircraft labels: measuring it keeps "10 km"
+  // and the compass letters from being printed over by a callsign.
+  function noteGridText(node, padding) {
+    var box = node.getBoundingClientRect();
+    var base = radar.getBoundingClientRect();
+    gridObstacles.push({
+      x: box.x - base.x - padding, y: box.y - base.y - padding,
+      w: box.width + padding * 2, h: box.height + padding * 2, grid: true
+    });
+  }
+
+  function overlaps(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  // Cost of putting a label here. Covering the compass letters or a range label
+  // (100) is worse than covering another aircraft's label (10), and a label that
+  // runs off the scope is a last resort (10 per edge).
+  function placementCost(candidate, obstacles) {
+    var cost = 0;
+    var gridHits = 0;
+    for (var i = 0; i < obstacles.length; i++) {
+      if (overlaps(candidate, obstacles[i])) {
+        cost += obstacles[i].grid ? 100 : 10;
+        if (obstacles[i].grid) { gridHits++; }
+      }
+    }
+    candidate.gridHits = gridHits;
+    if (candidate.x < 0) { cost += 10; }
+    if (candidate.y < 0) { cost += 10; }
+    if (candidate.x + candidate.w > size) { cost += 10; }
+    if (candidate.y + candidate.h > size) { cost += 10; }
+    return cost;
+  }
+
+  function angularGap(a, b) {
+    var gap = Math.abs(a - b) % 360;
+    return gap > 180 ? 360 - gap : gap;
+  }
+
+  // Range labels go on the diagonal furthest from every aircraft, best first: a fixed
+  // diagonal is guaranteed to be crossed by the label of whatever flies along it,
+  // which showed up as "20 km" printed through a callsign.
+  function ringLabelBearings(flights) {
+    var diagonals = [45, 135, 225, 315];
+    var scored = [];
+    for (var c = 0; c < diagonals.length; c++) {
+      var score = 181;
+      for (var i = 0; i < flights.length; i++) {
+        var bearing = num(flights[i].bearing);
+        if (bearing === null) { continue; }
+        var gap = angularGap(bearing, diagonals[c]);
+        if (gap < score) { score = gap; }
+      }
+      scored.push({ bearing: diagonals[c], score: score });
+    }
+    scored.sort(function (a, b) { return b.score - a.score; });
+    var ordered = [];
+    for (var s = 0; s < scored.length; s++) { ordered.push(scored[s].bearing); }
+    return ordered;
+  }
+
+  function drawTrails(flights) {
+    trailLayer.innerHTML = '';
+    if (!on(CFG.showTrails)) { return; }
+    for (var i = 0; i < flights.length; i++) {
+      var trail = flights[i].trail || [];
+      if (trail.length < 2) { continue; }
+      var points = [];
+      for (var t = 0; t < trail.length; t++) {
+        var at = project(trail[t][0], trail[t][1]);
+        points.push(at.x.toFixed(1) + ',' + at.y.toFixed(1));
+      }
+      trailLayer.appendChild(svgNode('polyline', { 'class': 'trail', points: points.join(' ') }));
+    }
+  }
+
+  function planeGlyph() {
+    var svg = svgNode('svg', { 'class': 'glyph', viewBox: '-10 -10 20 20' });
+    var path = svgNode('path', { d: 'M0 -9 L1.7 -3 L8 1 L8 3.2 L1.7 2.2 L1.3 6.4 L3.4 8.4 ' +
+      'L3.4 9.6 L0 8.8 L-3.4 9.6 L-3.4 8.4 L-1.3 6.4 L-1.7 2.2 L-8 3.2 L-8 1 L-1.7 -3 Z' });
+    svg.appendChild(path);
+    return svg;
+  }
+
+  function metaLine(flight) {
+    var parts = [];
+    if (on(CFG.showDistance)) { parts.push(distance(flight.distanceKm)); }
+    if (on(CFG.showSpeed) && flight.speed !== null && flight.speed !== undefined) {
+      parts.push(speed(flight.speed));
+    }
+    if (on(CFG.showType) && flight.type) { parts.push(flight.type); }
+    return parts.join('  ·  ');
+  }
+
+  function drawPlanes(flights) {
+    plots.innerHTML = '';
+    planes = [];
+    var gridHits = 0;
+    var glyphSize = Math.max(16, Math.round(size / 19));
+    var gap = Math.round(glyphSize * 0.72 + 8);
+    var band = Math.max(30, Math.round(size / 24));
+    // Obstacles a label must not be printed over: the home marker, the footer strip,
+    // and every compass letter / range label measured while the grid was drawn.
+    var placed = gridObstacles.slice();
+    placed.push({ x: centre.x - size * 0.09, y: centre.y - band / 2, w: size * 0.18, h: band });
+    placed.push({ x: -size, y: size - band * 1.3, w: size * 3, h: band * 1.6, ground: true });
+    for (var i = 0; i < flights.length; i++) {
+      var flight = flights[i];
+      var at = project(flight.bearing, flight.distanceKm);
+      var node = document.createElement('div');
+      // Labels always sit INWARD (towards the centre): a label hung outside passes
+      // over the compass letters and off the scope on an edge aircraft.
+      node.className = 'ac' + (i === 0 ? ' near' : '') + (at.x > centre.x ? ' left' : ' right');
+      node.style.left = at.x.toFixed(1) + 'px';
+      node.style.top = at.y.toFixed(1) + 'px';
+      var glyph = planeGlyph();
+      glyph.style.width = glyphSize + 'px';
+      glyph.style.height = glyphSize + 'px';
+      glyph.style.transform = 'rotate(' + (flight.heading === null ? 0 : flight.heading) + 'deg)';
+      node.appendChild(glyph);
+
+      var tag = document.createElement('div');
+      tag.className = 'tag';
+      var call = document.createElement('span');
+      call.className = 'call';
+      call.textContent = text(flight.name, 'Unknown');
+      if (flight.trend === 'climb' || flight.trend === 'descent') {
+        var trend = document.createElement('span');
+        trend.className = 'trend ' + flight.trend;
+        trend.textContent = flight.trend === 'climb' ? ' ▲' : ' ▼';
+        call.appendChild(trend);
+      }
+      tag.appendChild(call);
+      var altitudeText = '';
+      if (flight.altitude !== null && flight.altitude !== undefined
+          && flight.altitude > 100 && !flight.onGround) {
+        altitudeText = altitude(flight.altitude);
+      }
+      var meta = metaLine(flight);
+      if (altitudeText || meta) {
+        var metaNode = document.createElement('span');
+        metaNode.className = 'meta';
+        metaNode.textContent = [altitudeText, meta].filter(Boolean).join('  ·  ');
+        tag.appendChild(metaNode);
+      }
+      if (on(CFG.showRoute)) {
+        var routeText = routeLine(flight);
+        if (routeText) {
+          var routeNode = document.createElement('span');
+          routeNode.className = 'route';
+          routeNode.textContent = routeText;
+          tag.appendChild(routeNode);
+        }
+      }
+      node.appendChild(tag);
+      node.setAttribute('data-index', String(i));
+      plots.appendChild(node);
+
+      // Label placement: inward, then the first free slot in a bounded ladder of
+      // vertical offsets. Overlap resolution must terminate — a push-away loop can
+      // bounce between two neighbours forever, which is how labels used to collide.
+      // Two anchor sides × the ladder, scored: range labels sit on a diagonal, so a
+      // label anchored on the wrong side crosses them however far it is moved.
+      var width = tag.offsetWidth || 0;
+      var height = tag.offsetHeight || band;
+      var preferLeft = at.x > centre.x;
+      var sides = preferLeft ? [true, false] : [false, true];
+      var chosen = null, bestCost = Infinity, bestGridHits = 0;
+      for (var si = 0; si < sides.length && bestCost > 0; si++) {
+        var anchorX = sides[si] ? at.x - gap - width : at.x + gap;
+        for (var step = 0; step <= 7 && bestCost > 0; step++) {
+          var offsets = step === 0 ? [0] : [-step, step];
+          for (var oi = 0; oi < offsets.length; oi++) {
+            var candidate = { x: anchorX, y: at.y - height / 2 + offsets[oi] * (band + 6),
+                              w: width, h: height, left: sides[si] };
+            var cost = placementCost(candidate, placed);
+            if (cost < bestCost) {
+              bestCost = cost;
+              chosen = candidate;
+              bestGridHits = candidate.gridHits || 0;
+            }
+            if (cost === 0) { break; }
+          }
+        }
+      }
+      tag.style.marginTop = (chosen.y + chosen.h / 2 - at.y).toFixed(0) + 'px';
+      if (chosen.left) { tag.style.right = gap + 'px'; tag.style.left = 'auto'; }
+      else { tag.style.left = gap + 'px'; tag.style.right = 'auto'; }
+      placed.push(chosen);
+      planes.push({ flight: flight, node: node, x: at.x, y: at.y });
+      gridHits += bestGridHits;
+    }
+    return gridHits;
+  }
+
+  function routeLine(flight) {
+    var from = flight.originCode || flight.originCity;
+    var to = flight.destinationCode || flight.destinationCity;
+    if (from && to) { return from + '  →  ' + to; }
+    // Never fall back to the callsign/registration: the label's first line already
+    // shows it, and "EI-HAP" printed twice reads like a bug.
+    if (flight.airline) { return flight.airline; }
+    return '';
+  }
+
+  function showNotice(big, small, isError) {
+    notice.hidden = false;
+    notice.className = isError ? 'error' : '';
+    notice.querySelector('.big').textContent = big;
+    notice.querySelector('.small').textContent = small || '';
+  }
+
+  function detailRows(flight) {
+    var rows = [];
+    if (flight.registration) { rows.push('Registration ' + flight.registration); }
+    if (flight.type) { rows.push(flight.type); }
+    if (flight.airline) { rows.push(flight.airline); }
+    if (flight.originCity || flight.destinationCity) {
+      rows.push(text(flight.originCity, flight.originCode) + ' → '
+        + text(flight.destinationCity, flight.destinationCode));
+    }
+    rows.push('Altitude ' + (flight.altitude ? altitude(flight.altitude) : '—')
+      + '   Speed ' + (flight.speed ? speed(flight.speed) : '—'));
+    rows.push('Distance ' + distance(flight.distanceKm) + ' at ' + deg(flight.bearing) + '°');
+    return rows;
+  }
+
+  function renderSelected() {
+    var scrim = document.getElementById('scrim');
+    if (selected < 0 || selected >= planes.length) {
+      detail.hidden = true;
+      scrim.className = '';
+      return;
+    }
+    var flight = planes[selected].flight;
+    detail.querySelector('.d-call').textContent = text(flight.name, 'Unknown');
+    var routeText = routeLine(flight);
+    detail.querySelector('.d-route').textContent = routeText && routeText.indexOf('→') > 0 ? routeText : '';
+    detail.querySelector('.d-rows').textContent = detailRows(flight).join('   ');
+    detail.hidden = false;
+    scrim.className = 'on';
+  }
+
+  function render(data) {
+    viewKm = num(data.viewKm) || 5;
+    layout();
+    var rings = data.rings && data.rings.length ? data.rings : [viewKm / 2, viewKm];
+    var flights = data.flights || [];
+    drawTrails(flights);
+    // Place the range labels on the emptiest diagonal, then re-place them if any
+    // aircraft label still lands on them: measuring beats guessing, and the common
+    // case (first diagonal is free) costs one pass.
+    var bearings = ringLabelBearings(flights);
+    var bestHits = null, bestBearing = bearings[0];
+    for (var pass = 0; pass < bearings.length; pass++) {
+      drawGrid(rings, bearings[pass]);
+      var hits = drawPlanes(flights);
+      if (bestHits === null || hits < bestHits) { bestHits = hits; bestBearing = bearings[pass]; }
+      if (hits === 0) { break; }
+    }
+    if (bestBearing !== gridBearing) {
+      drawGrid(rings, bestBearing);
+      drawPlanes(flights);
+    }
+    var total = num(data.total);
+    countEl.textContent = String(total === null ? flights.length : total);
+    titleEl.textContent = text(CFG.title, 'AIRCRAFT OVERHEAD');
+    var bits = [];
+    if (flights.length) {
+      bits.push('nearest <b>' + distance(flights[0].distanceKm) + '</b>');
+      var highest = null;
+      for (var i = 0; i < flights.length; i++) {
+        if (flights[i].altitude !== null && (highest === null || flights[i].altitude > highest)) {
+          highest = flights[i].altitude;
+        }
+      }
+      if (highest !== null) { bits.push('highest <b>' + altitude(highest) + '</b>'); }
+      bits.push('range <b>' + distance(viewKm) + '</b>');
+    }
+    subEl.innerHTML = bits.join('<br>');
+    warnEl.textContent = text(data.warning, '');
+
+    if (data.error) {
+      showNotice(data.error, 'Check the Flightradar24 integration in Home Assistant.', true);
+    } else if (!flights.length) {
+      showNotice('No aircraft overhead', 'Watching ' + text(data.entityId, 'the sensor')
+        + ' · range ' + distance(viewKm), false);
+    } else {
+      notice.hidden = true;
+    }
+    var stamp = new Date((data.generatedAt ? data.generatedAt * 1000 : Date.now()));
+    footLeft.textContent = 'Updated ' + stamp.toLocaleTimeString();
+    footRight.textContent = text(data.entityId, 'sensor') + ' · Flightradar24 via Home Assistant';
+    // Hide the HOME caption when aircraft are directly overhead: its label would be
+    // the thing the nearest aircraft's label needs. The dot itself always stays.
+    var nearest = null;
+    for (var n = 0; n < flights.length; n++) {
+      var d = num(flights[n].distanceKm);
+      if (d !== null && (nearest === null || d < nearest)) { nearest = d; }
+    }
+    var hideHome = nearest !== null && viewKm > 0 && nearest < viewKm * 0.25;
+    document.getElementById('home').className = hideHome ? 'quiet' : '';
+    renderSelected();
+  }
+
+  function currentPath() {
+    var path = location.pathname;
+    if (path.charAt(path.length - 1) === '/') { path = path.slice(0, -1); }
+    return path;
+  }
+  function authSuffix() {
+    var fromUrl = new URLSearchParams(location.search).get('auth') || '';
+    var token = fromUrl || text(CFG.authToken, '');
+    return token ? '?auth=' + encodeURIComponent(token) : '';
+  }
+  function apiPath() {
+    var id = currentPath().split('/').pop();
+    return currentPath().replace(/\/display\/[^/]+$/, '/api/flights/' + id) + authSuffix();
+  }
+
+  function startBar() {
+    bar.classList.remove('run');
+    void bar.offsetWidth;               // re-trigger the CSS animation
+    bar.style.animationDuration = refreshSeconds + 's';
+    bar.classList.add('run');
+  }
+
+  function fetchData(callback) {
+    var request = new XMLHttpRequest();
+    request.open('GET', apiPath(), true);
+    request.setRequestHeader('X-Access-Token', text(CFG.authToken, ''));
+    request.onreadystatechange = function () {
+      if (request.readyState !== 4) { return; }
+      if (request.status === 200) {
+        try { callback(JSON.parse(request.responseText)); return; }
+        catch (error) { /* fall through to the error path */ }
+      }
+      callback({ error: 'Could not read flights from the app (HTTP ' + request.status + ').',
+                 flights: [], total: 0, viewKm: viewKm, rings: [viewKm / 2, viewKm] });
+    };
+    try { request.send(); }
+    catch (error) {
+      callback({ error: 'The app is unreachable from this device.', flights: [], total: 0,
+                 viewKm: viewKm, rings: [viewKm / 2, viewKm] });
+    }
+  }
+
+  function refresh() {
+    fetchData(function (data) {
+      try { render(data); } catch (error) { /* never let one bad payload kill the display */ }
+      startBar();
+    });
+  }
+
+  plots.addEventListener('click', function (event) {
+    var node = event.target;
+    while (node && node !== plots && !node.getAttribute('data-index')) { node = node.parentNode; }
+    if (node && node !== plots) {
+      var index = parseInt(node.getAttribute('data-index'), 10);
+      selected = (selected === index) ? -1 : index;
+      renderSelected();
+    } else {
+      selected = -1;
+      renderSelected();
+    }
+  });
+  window.addEventListener('resize', function () {
+    layout();
+    if (planes.length) { renderLast(); }
+  });
+
+  var last = DATA;
+  function renderLast() { if (last) { render(last); } }
+
+  // A page that arrives with its data embedded (the admin's unsaved-settings
+  // preview) is a snapshot: it must NOT poll. Inside an iframe built from srcdoc
+  // there is no usable base URL, so a refresh would 404 over a correct render.
+  var EMBEDDED = !!DATA;
+
+  sweep.className = on(CFG.showSweep) ? '' : 'off';
+  layout();
+  if (DATA) {
+    try { render(DATA); } catch (error) { showNotice('Display error', String(error), true); }
+    startBar();
+  } else {
+    countEl.textContent = '·';
+    subEl.textContent = 'Loading…';
+  }
+  if (!EMBEDDED) {
+    refresh();
+    timer = window.setInterval(refresh, refreshSeconds * 1000);
+    // A full reload every 30 minutes keeps a long-running kiosk on the current
+    // client code, since the page is served with Cache-Control: no-store.
+    window.setTimeout(function () { location.reload(); }, 30 * 60 * 1000);
+  }
+  void timer;
+})();
+</script>
+</body>
+</html>
