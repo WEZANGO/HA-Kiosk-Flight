@@ -1086,13 +1086,14 @@ class Handler(BaseHTTPRequestHandler):
                         airborne += 1
             if flights and not positioned:
                 continue        # schedule-only data: nothing with a position to plot
-            area = sensor_bounds_km(attributes.get("bounds") or "")
+            area = sensor_area_km(attributes.get("bounds") or "")
             found.append({
                 "entity_id": entity_id,
                 "name": as_text(attributes.get("friendly_name") or entity_id, 80),
                 "state": as_text(state.get("state"), 20),
                 "count": positioned,
                 "airborne": airborne,
+                # Same figure the display prints ("area ≈50 km"), not the box diagonal.
                 "area": f"≈{round(area)} km" if area else "",
             })
         # Aircraft-in-area sensors first, then anything else by name.
