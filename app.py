@@ -18,7 +18,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 
 # Module constants: a local test harness rebinds these before serving (see DOCS.md).
@@ -65,11 +65,12 @@ SORT_KEYS = ("nearest", "lowest", "highest", "fastest", "callsign")
 UNIT_KEYS = ("metric", "aviation", "imperial")
 CENTRE_KEYS = ("home", "custom")
 
-STATE_TTL = 5.0         # seconds a Supervisor /states reply is reused
+STATE_TTL = 5.0         # seconds a Supervisor API reply is reused
 ZONE_TTL = 300.0        # seconds zone.home coordinates are reused
 STATE_LOCK = threading.Lock()
 _STATE_MAP: dict = {}
 _STATE_MAP_AT = 0.0
+_ENTITY_CACHE: dict = {}   # entity_id -> (fetched_at, state)
 _ZONE_AT = 0.0
 _ZONE_POINT = None
 
@@ -94,11 +95,22 @@ def as_text(value, limit=120):
     return str(value).strip()[:limit]
 
 
-def flag(value, default=True) -> bool:
-    """Read a stored boolean. Anything but an explicit "false" counts as true."""
+def truthy(value, default: bool = True) -> bool:
+    """Tolerant boolean reader.
+
+    Display settings arrive as the strings "true"/"false" (FormData -> JSON -> JS),
+    but the same helper is used for booleans coming out of Home Assistant, where the
+    Flightradar24 integration publishes `on_ground` as an INTEGER 0/1. Reading that
+    with a string-only test made 0 look truthy, which hid every aircraft on the
+    display: handle bool, number and string explicitly.
+    """
     if value is None or value == "":
         return default
-    return str(value).strip().lower() != "false"
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() not in ("false", "0", "no", "off", "none")
 
 
 def options() -> dict:
@@ -146,8 +158,8 @@ def access_token() -> str:
 def supervisor_states() -> dict:
     """Every entity state, keyed by entity_id, cached for a few seconds.
 
-    One call fills the cache for the page render, the API poll and the admin
-    page's sensor list, instead of one HA request each.
+    Only the admin page's sensor list needs the whole map; the display reads its one
+    sensor (and zone.home) through entity_state() instead.
     """
     global _STATE_MAP, _STATE_MAP_AT
     with STATE_LOCK:
@@ -173,7 +185,40 @@ def supervisor_states() -> dict:
 
 
 def entity_state(entity_id: str):
-    return supervisor_states().get(entity_id)
+    """One entity's state, fetched directly and cached briefly.
+
+    The display polls about every 20 s and needs exactly two entities. Reading every
+    state on the instance (1 MB on this one, almost all of it the Flightradar24
+    `flights` attributes) to get two of them is wasteful on both the Supervisor proxy
+    and the kiosk, so ask for the entity. A missing entity is `None`, not an error:
+    that is what produces the "no such entity" message rather than a scary failure.
+    """
+    now = time.time()
+    with STATE_LOCK:
+        hit = _ENTITY_CACHE.get(entity_id)
+        if hit and now - hit[0] < STATE_TTL:
+            return hit[1]
+    if not SUPERVISOR_TOKEN:
+        raise ValueError("Reading Home Assistant entities needs the homeassistant_api "
+                         "permission and must run as a Home Assistant app.")
+    request = Request(f"{SUPERVISOR_API}/states/{quote(entity_id)}",
+                      headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}",
+                               "Content-Type": "application/json"})
+    state = None
+    try:
+        with urlopen(request, timeout=15) as response:
+            state = json.load(response)
+    except HTTPError as error:
+        if error.code != 404:
+            raise ValueError(f"Home Assistant API returned HTTP {error.code}.") from None
+    except (URLError, OSError):
+        raise ValueError("Home Assistant API is unreachable.") from None
+    with STATE_LOCK:
+        _ENTITY_CACHE[entity_id] = (now, state)
+        if len(_ENTITY_CACHE) > 64:                     # kiosks are long-lived
+            for stale in sorted(_ENTITY_CACHE, key=lambda key: _ENTITY_CACHE[key][0])[:16]:
+                _ENTITY_CACHE.pop(stale, None)
+    return state
 
 
 def home_point():
@@ -230,18 +275,54 @@ def sensor_bounds_km(bounds: str):
 
     The Flightradar24 sensor publishes `bounds` as "lat1,lat2,lon1,lon2".
     """
-    parts = []
-    for piece in str(bounds or "").split(","):
-        value = as_float(piece)
-        if value is None:
-            return None
-        parts.append(value)
-    if len(parts) != 4:
+    parts = _bounds_parts(bounds)
+    if parts is None:
         return None
     lat1, lat2, lon1, lon2 = parts
     mid_lat = (lat1 + lat2) / 2.0
     mid_lon = (lon1 + lon2) / 2.0
     return haversine_km(mid_lat, mid_lon, lat1, lon1)
+
+
+def sensor_area_km(bounds: str):
+    """Half-WIDTH of the sensor's box in km: how far each way the sensor looks.
+
+    This is the number a user can act on ("my sensor only covers 50 km"), whereas the
+    half-diagonal is the right thing for fitting the whole box on screen.
+    """
+    parts = _bounds_parts(bounds)
+    if parts is None:
+        return None
+    lat1, lat2, lon1, lon2 = parts
+    mid_lat = (lat1 + lat2) / 2.0
+    mid_lon = (lon1 + lon2) / 2.0
+    north_south = haversine_km(lat1, mid_lon, lat2, mid_lon)
+    east_west = haversine_km(mid_lat, lon1, mid_lat, lon2)
+    return (north_south + east_west) / 4.0
+
+
+def bounds_corners(bounds: str, latitude: float, longitude: float):
+    """The sensor's box as four [bearing, km] corners, so the display can SHOW the
+    area it is watching. Aircraft are only ever reported from inside it."""
+    parts = _bounds_parts(bounds)
+    if parts is None:
+        return []
+    lat1, lat2, lon1, lon2 = parts
+    corners = []
+    for corner_lat, corner_lon in ((lat1, lon1), (lat1, lon2), (lat2, lon2), (lat2, lon1)):
+        corners.append([round(bearing_deg(latitude, longitude, corner_lat, corner_lon), 1),
+                        round(haversine_km(latitude, longitude, corner_lat, corner_lon), 3)])
+    return corners
+
+
+def _bounds_parts(bounds: str):
+    values = []
+    for piece in str(bounds or "").split(","):
+        value = as_float(piece)
+        if value is None:
+            return None
+        values.append(value)
+    return values if len(values) == 4 else None
 
 
 # --------------------------------------------------------------------------- #
@@ -257,8 +338,13 @@ def flight_rows(config: dict) -> dict:
     payload = {
         "generatedAt": time.time(),
         "entityId": entity_id,
+        "entityName": "",
         "entityState": None,
         "sensorBounds": "",
+        "areaKm": None,
+        "areaBox": [],
+        "areaCount": 0,
+        "hiddenGround": 0,
         "rangeKm": None,
         "viewKm": None,
         "rings": [],
@@ -303,16 +389,23 @@ def flight_rows(config: dict) -> dict:
                             "'in area' sensor.")
         return payload
     payload["entityState"] = as_text(state.get("state"), 40)
+    payload["entityName"] = as_text(attributes.get("friendly_name") or entity_id, 80)
     payload["sensorBounds"] = as_text(attributes.get("bounds"), 80)
     box_km = sensor_bounds_km(payload["sensorBounds"])
-    hide_on_ground = flag(config.get("hideOnGround"))
+    area_km = sensor_area_km(payload["sensorBounds"])
+    payload["areaKm"] = round(area_km, 1) if area_km else None
+    payload["areaBox"] = bounds_corners(payload["sensorBounds"], latitude, longitude)
+    hide_on_ground = truthy(config.get("hideOnGround"))
 
     rows = []
+    hidden_ground = 0
     for flight in flights:
         if not isinstance(flight, dict):
             continue
-        if hide_on_ground and flag(flight.get("on_ground"), False):
-            continue
+        if truthy(flight.get("on_ground"), False):
+            hidden_ground += 1
+            if hide_on_ground:
+                continue
         fl_lat = as_float(flight.get("latitude"))
         fl_lon = as_float(flight.get("longitude"))
         if fl_lat is None or fl_lon is None:
@@ -345,6 +438,7 @@ def flight_rows(config: dict) -> dict:
             "heading": as_float(flight.get("heading")),
             "vertical": vertical,
             "trend": trend,
+            "onGround": truthy(flight.get("on_ground"), False),
             "distanceKm": round(distance, 3),
             "bearing": round(bearing_deg(latitude, longitude, fl_lat, fl_lon), 1),
         }
@@ -381,6 +475,10 @@ def flight_rows(config: dict) -> dict:
         limit = 6
     limit = max(1, min(20, limit))
     payload["total"] = total
+    payload["hiddenGround"] = hidden_ground
+    # What the sensor itself reports for its area — the number that answers "why is
+    # my display empty when Flightradar shows aircraft?".
+    payload["areaCount"] = sum(1 for flight in flights if isinstance(flight, dict))
     payload["flights"] = rows[:limit]
     if total > limit:
         payload["warning"] = f"Showing {limit} of {total} aircraft overhead."
@@ -475,7 +573,7 @@ def clean_display(payload: dict, existing: dict = None) -> dict:
     combined["title"] = as_text(combined.get("title"), 60)
     for key in ("hideOnGround", "showRoute", "showType", "showSpeed", "showDistance",
                 "showTrails", "showRings", "showSweep"):
-        combined[key] = "true" if flag(combined.get(key)) else "false"
+        combined[key] = "true" if truthy(combined.get(key)) else "false"
     values.update(combined)
     return values
 
@@ -571,6 +669,10 @@ and is read server-side, so a kiosk on a network with no internet needs nothing 
 <label>Title shown on screen<input name="title" placeholder="AIRCRAFT OVERHEAD"></label>
 <div class="sensor-status" id="sensor-status">Checking the sensor…</div>
 <label class="wide">Sensor<select name="entityId" id="entity-select"></select></label>
+<p class="hint wide"><strong>Which aircraft appear is decided by the Flightradar24 integration, not by this
+app.</strong> A sensor only reports aircraft inside its own area and radius, and an aircraft it hides (below
+its minimum altitude, say) never reaches this display. To change the area: Home Assistant → Settings →
+Devices &amp; services → Flightradar24 → Configure. The radar range below is <em>zoom only</em>.</p>
 <h3>What to show</h3>
 <label class="slider-field">Aircraft shown<output id="max-out">6</output>
   <div class="slider-row"><input type="range" name="maxFlights" min="1" max="20" step="1" value="6"
@@ -583,8 +685,9 @@ and is read server-side, so a kiosk on a network with no internet needs nothing 
   <option value="metric">Metric — km, m, km/h</option>
   <option value="aviation">Aviation — nautical miles, feet, knots</option>
   <option value="imperial">Imperial — miles, feet, mph</option></select></label>
-<label>View range (km)<input name="rangeKm" type="number" min="0" max="500" step="0.5" placeholder="0">
-  <span class="hint">0 fits the view to the sensor's area and the furthest aircraft.</span></label>
+<label>Radar range (km)<input name="rangeKm" type="number" min="0" max="500" step="0.5" placeholder="0">
+  <span class="hint">Zoom only. 0 fits the view to the sensor's area and the furthest aircraft; a fixed
+  value zooms out to that radius. It cannot bring in aircraft the sensor does not report.</span></label>
 <label>Refresh every (seconds)<input name="refreshInterval" type="number" min="5" max="3600" step="1"></label>
 <label class="check"><input type="checkbox" name="showRoute" data-flag> Origin → destination</label>
 <label class="check"><input type="checkbox" name="showType" data-flag> Aircraft type</label>
@@ -681,19 +784,25 @@ async function loadSensors(){
   var parts=[];
   for(var i=0;i<data.sensors.length;i++){
     var s=data.sensors[i];var option=document.createElement('option');
-    option.value=s.entity_id;option.textContent=s.name+' ('+s.entity_id+')';selectEl.append(option);
-    if(i<3)parts.push('<b>'+s.count+'</b> in '+s.entity_id.replace('sensor.flightradar24_',''))}
+    option.value=s.entity_id;
+    option.textContent=s.name+' — '+s.airborne+' airborne of '+s.count
+      +(s.area?', '+s.area+' area':'')+' ('+s.entity_id+')';
+    selectEl.append(option);
+    if(i<3)parts.push('<b>'+s.airborne+'</b> airborne of '+s.count+' in '
+      +s.entity_id.replace('sensor.flightradar24_','')+(s.area?' ('+s.area+')':''))}
   // Whether anything is actually overhead right now, right on the list page: an
   // empty display is normal, and this is how you tell "quiet sky" from "broken".
-  summaryEl.innerHTML='Aircraft in the area right now: '+parts.join(' · ')
-    +' — <b>0 is normal</b> when nothing is flying over.';
+  summaryEl.innerHTML='Sensor reports right now: '+parts.join(' · ')
+    +'. Each sensor only looks at its own area, so <b>0 is normal</b> — widen the area in the '
+    +'Flightradar24 integration if you want more traffic.';
   var want=f.elements['edit-id'].value?f.elements['entityId'].value:'';
   if(!want)want=data.default_entity;
   for(var j=0;j<selectEl.options.length;j++)if(selectEl.options[j].value===want)selectEl.value=want;
   var chosen=null;
   for(var k=0;k<data.sensors.length;k++)if(data.sensors[k].entity_id===selectEl.value)chosen=data.sensors[k];
   statusEl.innerHTML=chosen
-    ? 'Sensor live: <b>'+chosen.count+'</b> aircraft in the area right now · state '+chosen.state
+    ? 'Sensor live: <b>'+chosen.airborne+'</b> airborne of <b>'+chosen.count+'</b> in the area'
+      +(chosen.area?' ('+chosen.area+')':'')+' · state '+chosen.state
     : 'Pick a sensor below.';
 }
 function render(){
@@ -969,17 +1078,22 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(flights, list):
                 continue
             positioned = 0
+            airborne = 0
             for flight in flights:
                 if isinstance(flight, dict) and as_float(flight.get("latitude")) is not None:
                     positioned += 1
+                    if not truthy(flight.get("on_ground"), False):
+                        airborne += 1
             if flights and not positioned:
                 continue        # schedule-only data: nothing with a position to plot
+            area = sensor_bounds_km(attributes.get("bounds") or "")
             found.append({
                 "entity_id": entity_id,
                 "name": as_text(attributes.get("friendly_name") or entity_id, 80),
                 "state": as_text(state.get("state"), 20),
                 "count": positioned,
-                "bounds": as_text(attributes.get("bounds"), 80),
+                "airborne": airborne,
+                "area": f"≈{round(area)} km" if area else "",
             })
         # Aircraft-in-area sensors first, then anything else by name.
         found.sort(key=lambda item: (0 if "in_area" in item["entity_id"] else 1, item["entity_id"]))

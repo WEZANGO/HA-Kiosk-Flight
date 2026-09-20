@@ -78,7 +78,7 @@ The shared access token lives in `/data/access_token` — deliberately **not** i
 | Aircraft shown | 1–20, nearest first by default |
 | Sort by | nearest / lowest / highest / fastest / callsign |
 | Units | Metric (km, m, km/h) · Aviation (nm, ft, kt) · Imperial (mi, ft, mph) |
-| View range (km) | `0` = automatic: fits the sensor's box **and** the furthest aircraft, so nothing is ever drawn off-screen |
+| View range (km) — *"Radar range"* | `0` = automatic: fits the sensor's box **and** the furthest aircraft, so nothing is ever drawn off-screen. **Zoom only** — it cannot bring in aircraft the sensor does not report. |
 | Refresh every | seconds; the display polls the app, the app caches HA state for 5 s |
 | Origin → destination, Aircraft type, Speed, Distance from the centre | label content |
 | Hide aircraft on the ground | default on |
@@ -108,9 +108,36 @@ needs nothing but this app:
   requests**. There is deliberately no generic proxy endpoint: there is nothing to proxy, and an
   unused open relay is a liability.
 
-What the app does **not** do: it does not call Flightradar24 itself. If the sensor is empty the
-display says *No aircraft overhead*, which is the normal state most of the time — the sensor's
-area is a box a few kilometres across. Widen the radius on the *integration*, and this app follows.
+What the app does **not** do: it does not call Flightradar24 itself, and it cannot widen
+what the sensor reports.
+
+## What decides which aircraft appear
+
+This is the question that matters, because it is **not** a setting in this app:
+
+```
+Flightradar24 integration (HA)          this app
+├─ area/radius  ── which box is polled ─┐
+├─ min/max altitude (defaults: no limit)│  ─→  tailable filters  ─→  display
+└─ its own data source (free/paid)      ┘        (hide ground aircraft,
+                                                  aircraft shown, sort)
+```
+
+* **The area is the integration's.** With `100` set on the integration the sensor's box is
+  100 km × 100 km (≈ ±50 km each way) — the display prints that as `area ≈50 km` in the
+  footer and draws the box as a dashed outline on the scope. Aircraft outside it are never
+  reported, so widening *this app's* "Radar range" cannot reveal them.
+* **The scope shows where the boundary is.** The dashed box on the radar is the sensor's
+  own coverage; the whole reason it exists is so "nothing is showing" is never a mystery.
+* **The integration also filters.** It publishes `on_ground` for taxiing aircraft and its
+  own min/max altitude window. This app additionally hides aircraft on the ground by
+  default ("Hide aircraft on the ground"), and the footer says how many it hid
+  (`2 on the ground hidden`).
+* **`Aircraft shown` (1–20)** is only a display limit, applied after sorting; the footer
+  and the HUD count always report how many are actually there (`2 airborne of 4`).
+
+So an empty display means one of: the sensor's area is quiet, the sensor is unavailable, or
+the only aircraft in it are on the ground. All three are visible on the page now.
 
 ## Flight data used
 
@@ -129,9 +156,11 @@ somewhere else (not `zone.home`) is still correct.
 |---|---|
 | "Home Assistant has no entity sensor.…" | the sensor ID is wrong, or the Flightradar24 integration is not installed |
 | "… has no 'flights' list" | that entity is not an *in area* sensor (an airport sensor reports schedules without positions) |
-| "No aircraft overhead" | the sensor's area is empty right now; the admin page's *Aircraft in the area right now* line says how many there are |
+| "No aircraft in the sensor area" | nothing airborne inside the sensor's own area (now stated on screen, with that area's size). Widen the area in the Flightradar24 integration — `Radar range` here is zoom only |
+| Widened the area and still nothing | check the footer: `N on the ground hidden` means every flight in the area is taxiing, and `0 airborne of 0` means the box is genuinely quiet. The dashed box on the scope shows exactly how far the sensor looks |
 | "Reading Home Assistant entities needs the homeassistant_api permission" | the app is running outside Home Assistant, or `homeassistant_api: true` was removed from `config.yaml` |
 | Display shows a 401 | direct URL without `?auth=…` — copy the link from the admin page instead of typing it |
+| "Display error" on screen | a client-side render failure. It is shown deliberately: a swallowed error used to leave a blank scope with no explanation |
 
 ## Design rules this app follows
 

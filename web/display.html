@@ -25,7 +25,7 @@
   #grid,#trails{position:absolute;left:0;top:0}
   #plots{position:absolute;left:0;top:0;width:100%;height:100%}
   #sweep{position:absolute;left:0;top:0;width:100%;height:100%;
-    animation:sweep 7s linear infinite;opacity:.5;pointer-events:none}
+    animation:sweep 7s linear infinite;pointer-events:none}
   #sweep.off{display:none}
   @keyframes sweep{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
   .ring{fill:none;stroke:rgba(148,197,255,.16);stroke-width:1}
@@ -36,6 +36,11 @@
   .rlabel{fill:rgba(148,197,255,.42);stroke:none;
     font-family:ui-monospace,Menlo,Consolas,monospace}
   .cosmetic{fill:none;stroke:rgba(148,197,255,.10);stroke-width:1;stroke-dasharray:2 10}
+  /* The sensor's own coverage: the display can only ever show what is inside it. */
+  .areabox{fill:rgba(125,211,252,.035);stroke:rgba(125,211,252,.30);stroke-width:1;
+    stroke-dasharray:7 7}
+  .arealabel{fill:rgba(170,215,245,.62);stroke:none;letter-spacing:.06em;
+    font-family:ui-monospace,Menlo,Consolas,monospace;text-anchor:middle}
   #home{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);pointer-events:none}
   .home-dot{width:11px;height:11px;border-radius:50%;background:#eaf6ff;margin:0 auto;
     box-shadow:0 0 0 3px rgba(125,211,252,.25),0 0 18px rgba(125,211,252,.75)}
@@ -113,13 +118,7 @@
 <div id="stage">
   <div id="radar">
     <svg id="grid" xmlns="http://www.w3.org/2000/svg"></svg>
-    <div id="sweep"><svg xmlns="http://www.w3.org/2000/svg"><defs>
-      <linearGradient id="swg" x1="0" y1="0" x2="1" y2="0">
-        <stop offset="0%" stop-color="#7dd3fc" stop-opacity="0"/>
-        <stop offset="100%" stop-color="#7dd3fc" stop-opacity=".30"/>
-      </linearGradient></defs>
-      <path id="swpath" fill="url(#swg)"></path>
-      <line id="swline" stroke="#bfe9ff" stroke-width="1.2" stroke-opacity=".55"/></svg></div>
+    <div id="sweep"><svg id="sweep-svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
     <svg id="trails" xmlns="http://www.w3.org/2000/svg"></svg>
     <div id="plots"></div>
     <div id="home"><div class="home-pulse"></div><div class="home-dot"></div>
@@ -166,6 +165,12 @@
     if (km === null) { return ''; }
     return (km * U.distFactor).toFixed(km * U.distFactor < 10 ? 1 : 0) + ' ' + U.dist;
   }
+  // Distance without the unit, for lists that share one unit label.
+  function distValue(km) {
+    if (km === null || km === undefined) { return ''; }
+    var value = km * U.distFactor;
+    return value < 10 ? value.toFixed(1) : String(Math.round(value));
+  }
   function altitude(feet) {
     if (feet === null) { return ''; }
     var value = feet * U.altFactor;
@@ -196,8 +201,9 @@
   var centre = { x: 300, y: 300 };
   var viewKm = 5;
   var planes = [];         // placed plot nodes, for hit-testing
-  var gridObstacles = [];  // compass letters + range labels, measured while drawing
-  var gridBearing = 45;    // diagonal the range labels are currently drawn on
+  var gridObstacles = [];  // compass letters + area label, measured while drawing
+  var areaBox = [];        // the sensor's coverage box, four [bearing, km] corners
+  var areaKm = null;       // how far the sensor looks in each direction
   var selected = -1;
   var refreshSeconds = Math.max(5, num(CFG.refreshInterval) || 20);
   var timer = null;
@@ -213,21 +219,42 @@
     grid.setAttribute('height', size);
     trailLayer.setAttribute('width', size);
     trailLayer.setAttribute('height', size);
-    document.getElementById('swpath').setAttribute('d', wedgePath());
-    document.getElementById('swline').setAttribute('x1', centre.x);
-    document.getElementById('swline').setAttribute('y1', centre.y);
-    document.getElementById('swline').setAttribute('x2', centre.x);
-    document.getElementById('swline').setAttribute('y2', 0);
+    drawSweep();
   }
 
-  function wedgePath() {
-    var radius = size / 2 - 2;
-    var span = 52 * Math.PI / 180;             // degrees of trailing tint
-    var start = -Math.PI / 2;                  // straight up
-    var x2 = centre.x + radius * Math.sin(start + span);
-    var y2 = centre.y - radius * Math.cos(start + span);
-    return 'M ' + centre.x + ' ' + centre.y + ' L ' + centre.x + ' ' + (centre.y - radius)
+  // A radar sweep is an ANGULAR fade trailing a bright leading edge, so it is drawn
+  // as stacked wedges here rather than with a CSS gradient box. It MUST be sized to
+  // the radar: an SVG with no width/height is 300x150, and the wedge (drawn in radar
+  // pixels) is then clipped to that box and spins as a sliver off the centre — which
+  // is exactly how it looked wrong.
+  function sweepPath(radius, fromDeg, toDeg) {
+    var from = fromDeg * Math.PI / 180;
+    var to = toDeg * Math.PI / 180;
+    var x1 = centre.x + radius * Math.sin(from);
+    var y1 = centre.y - radius * Math.cos(from);
+    var x2 = centre.x + radius * Math.sin(to);
+    var y2 = centre.y - radius * Math.cos(to);
+    return 'M ' + centre.x + ' ' + centre.y + ' L ' + x1.toFixed(1) + ' ' + y1.toFixed(1)
       + ' A ' + radius + ' ' + radius + ' 0 0 1 ' + x2.toFixed(1) + ' ' + y2.toFixed(1) + ' Z';
+  }
+
+  function drawSweep() {
+    var svg = document.getElementById('sweep-svg');
+    svg.setAttribute('width', size);
+    svg.setAttribute('height', size);
+    while (svg.firstChild) { svg.removeChild(svg.firstChild); }
+    if (!on(CFG.showSweep)) { return; }
+    var radius = size / 2 - 2;
+    var bands = 8, span = 7;                  // 56 degrees of trail behind the edge
+    for (var i = bands; i >= 1; i--) {
+      var alpha = 0.02 + 0.16 * (1 - (i - 1) / bands);
+      svg.appendChild(svgNode('path', {
+        d: sweepPath(radius, -(i * span), -((i - 1) * span)),
+        fill: 'rgba(125,211,252,' + alpha.toFixed(3) + ')'
+      }));
+    }
+    svg.appendChild(svgNode('line', { x1: centre.x, y1: centre.y, x2: centre.x, y2: centre.y - radius,
+      stroke: '#bfe9ff', 'stroke-width': Math.max(1.4, size / 480), 'stroke-opacity': 0.5 }));
   }
 
   // Polar -> screen: north up, bearing clockwise.
@@ -247,30 +274,47 @@
   function drawGrid(rings, bearing) {
     grid.innerHTML = '';
     gridObstacles = [];
-    gridBearing = bearing;
     var radius = size / 2 - 6;
     // SVG text does not follow the CSS viewport units used elsewhere, so the
     // scale-dependent grid labels are sized from the radar itself here.
     var cardFont = Math.max(14, Math.round(size / 45));
-    var ringFont = Math.max(12, Math.round(size / 60));
     var showRings = on(CFG.showRings);
     if (showRings) {
       for (var i = 0; i < rings.length; i++) {
         var r = radius * Math.min(1, rings[i] / viewKm);
         grid.appendChild(svgNode('circle', { 'class': 'ring' + (i === rings.length - 1 ? ' major' : ''),
           cx: centre.x, cy: centre.y, r: r.toFixed(1) }));
-        // Range labels sit on the diagonal furthest from the traffic (see
-        // ringLabelBearings), so they never have to share space with a callsign.
-        var at = project(bearing, rings[i]);
-        var label = svgNode('text', { 'class': 'rlabel', 'font-size': ringFont,
-          x: (at.x + 6).toFixed(1), y: (at.y + 4).toFixed(1), 'text-anchor': 'start' });
-        label.textContent = distance(rings[i]);
-        grid.appendChild(label);
-        noteGridText(label, 2);
+        // Each ring gets a small tick where the distances are anchored, but the
+        // distance TEXT lives in the HUD instead: text sitting on the scope is one more
+        // thing an aircraft label can collide with, and this is a crowded sky.
+        var anchor = project(bearing, rings[i]);
+        var inward = project(bearing, rings[i] * 0.97);
+        grid.appendChild(svgNode('line', { 'class': 'tick', x1: inward.x.toFixed(1), y1: inward.y.toFixed(1),
+          x2: anchor.x.toFixed(1), y2: anchor.y.toFixed(1) }));
       }
     }
     // Outer boundary + cardinal ticks.
     grid.appendChild(svgNode('circle', { 'class': 'cosmetic', cx: centre.x, cy: centre.y, r: radius }));
+    // The area the sensor actually watches, from its own `bounds`: aircraft are only
+    // ever reported from inside it, so it answers "why is nothing showing?" at a glance.
+    if (areaBox.length === 4) {
+      var corners = [];
+      for (var b = 0; b < areaBox.length; b++) {
+        corners.push(project(areaBox[b][0], areaBox[b][1]));
+      }
+      var points = [];
+      for (var c2 = 0; c2 < corners.length; c2++) {
+        points.push(corners[c2].x.toFixed(1) + ',' + corners[c2].y.toFixed(1));
+      }
+      grid.appendChild(svgNode('polygon', { 'class': 'areabox', points: points.join(' ') }));
+      var mid = { x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2 };
+      var areaFont = Math.max(11, Math.round(size / 68));
+      var areaNode = svgNode('text', { 'class': 'arealabel', 'font-size': areaFont,
+        x: mid.x.toFixed(1), y: (mid.y + areaFont * 1.4).toFixed(1) });
+      areaNode.textContent = 'sensor area ' + (areaKm ? distance(areaKm) : '');
+      grid.appendChild(areaNode);
+      noteGridText(areaNode, 4);
+    }
     var cardinals = [['N', 0], ['E', 90], ['S', 180], ['W', 270]];
     for (var c = 0; c < cardinals.length; c++) {
       var bearing = cardinals[c][1];
@@ -307,14 +351,11 @@
   // runs off the scope is a last resort (10 per edge).
   function placementCost(candidate, obstacles) {
     var cost = 0;
-    var gridHits = 0;
     for (var i = 0; i < obstacles.length; i++) {
       if (overlaps(candidate, obstacles[i])) {
         cost += obstacles[i].grid ? 100 : 10;
-        if (obstacles[i].grid) { gridHits++; }
       }
     }
-    candidate.gridHits = gridHits;
     if (candidate.x < 0) { cost += 10; }
     if (candidate.y < 0) { cost += 10; }
     if (candidate.x + candidate.w > size) { cost += 10; }
@@ -385,7 +426,6 @@
   function drawPlanes(flights) {
     plots.innerHTML = '';
     planes = [];
-    var gridHits = 0;
     var glyphSize = Math.max(16, Math.round(size / 19));
     var gap = Math.round(glyphSize * 0.72 + 8);
     var band = Math.max(30, Math.round(size / 24));
@@ -422,8 +462,12 @@
       }
       tag.appendChild(call);
       var altitudeText = '';
-      if (flight.altitude !== null && flight.altitude !== undefined
-          && flight.altitude > 100 && !flight.onGround) {
+      if (flight.onGround) {
+        // Only reachable when "hide aircraft on the ground" is off — say so instead of
+        // printing a meaningless 0 ft.
+        altitudeText = 'on the ground';
+      } else if (flight.altitude !== null && flight.altitude !== undefined
+          && flight.altitude > 100) {
         altitudeText = altitude(flight.altitude);
       }
       var meta = metaLine(flight);
@@ -453,9 +497,15 @@
       // label anchored on the wrong side crosses them however far it is moved.
       var width = tag.offsetWidth || 0;
       var height = tag.offsetHeight || band;
-      var preferLeft = at.x > centre.x;
+      // Preferred side: an aircraft near the centre would drop its label onto the home
+      // marker (or onto another near-centre label) if it pointed inward, so those hang
+      // OUTWARD; further out, inward keeps the label inside the scope and clear of the
+      // compass letters. The scored search still tries both.
+      var offsetX = at.x - centre.x, offsetY = at.y - centre.y;
+      var fromCentre = Math.sqrt(offsetX * offsetX + offsetY * offsetY);
+      var preferLeft = fromCentre < (size / 2) * 0.35 ? (at.x < centre.x) : (at.x > centre.x);
       var sides = preferLeft ? [true, false] : [false, true];
-      var chosen = null, bestCost = Infinity, bestGridHits = 0;
+      var chosen = null, bestCost = Infinity;
       for (var si = 0; si < sides.length && bestCost > 0; si++) {
         var anchorX = sides[si] ? at.x - gap - width : at.x + gap;
         for (var step = 0; step <= 7 && bestCost > 0; step++) {
@@ -467,7 +517,6 @@
             if (cost < bestCost) {
               bestCost = cost;
               chosen = candidate;
-              bestGridHits = candidate.gridHits || 0;
             }
             if (cost === 0) { break; }
           }
@@ -478,9 +527,7 @@
       else { tag.style.left = gap + 'px'; tag.style.right = 'auto'; }
       placed.push(chosen);
       planes.push({ flight: flight, node: node, x: at.x, y: at.y });
-      gridHits += bestGridHits;
     }
-    return gridHits;
   }
 
   function routeLine(flight) {
@@ -533,25 +580,19 @@
 
   function render(data) {
     viewKm = num(data.viewKm) || 5;
+    // The sensor's own coverage, set before the grid is drawn.
+    areaBox = (data.areaBox && data.areaBox.length === 4) ? data.areaBox : [];
+    areaKm = num(data.areaKm);
+    var hiddenGround = num(data.hiddenGround) || 0;
     layout();
     var rings = data.rings && data.rings.length ? data.rings : [viewKm / 2, viewKm];
     var flights = data.flights || [];
     drawTrails(flights);
-    // Place the range labels on the emptiest diagonal, then re-place them if any
-    // aircraft label still lands on them: measuring beats guessing, and the common
-    // case (first diagonal is free) costs one pass.
+    // Range ticks go on the diagonal furthest from the traffic (cosmetic), but the
+    // ring DISTANCES are text in the HUD, so there is no scope text to collide with.
     var bearings = ringLabelBearings(flights);
-    var bestHits = null, bestBearing = bearings[0];
-    for (var pass = 0; pass < bearings.length; pass++) {
-      drawGrid(rings, bearings[pass]);
-      var hits = drawPlanes(flights);
-      if (bestHits === null || hits < bestHits) { bestHits = hits; bestBearing = bearings[pass]; }
-      if (hits === 0) { break; }
-    }
-    if (bestBearing !== gridBearing) {
-      drawGrid(rings, bestBearing);
-      drawPlanes(flights);
-    }
+    drawGrid(rings, bearings[0]);
+    drawPlanes(flights);
     var total = num(data.total);
     countEl.textContent = String(total === null ? flights.length : total);
     titleEl.textContent = text(CFG.title, 'AIRCRAFT OVERHEAD');
@@ -565,7 +606,11 @@
         }
       }
       if (highest !== null) { bits.push('highest <b>' + altitude(highest) + '</b>'); }
-      bits.push('range <b>' + distance(viewKm) + '</b>');
+      if (rings.length) {
+        var ringText = [];
+        for (var ri = 0; ri < rings.length; ri++) { ringText.push(distValue(rings[ri])); }
+        bits.push('rings <b>' + ringText.join(' · ') + '</b> ' + U.dist);
+      }
     }
     subEl.innerHTML = bits.join('<br>');
     warnEl.textContent = text(data.warning, '');
@@ -573,14 +618,38 @@
     if (data.error) {
       showNotice(data.error, 'Check the Flightradar24 integration in Home Assistant.', true);
     } else if (!flights.length) {
-      showNotice('No aircraft overhead', 'Watching ' + text(data.entityId, 'the sensor')
-        + ' · range ' + distance(viewKm), false);
+      // Be explicit about WHY it is empty: the sensor's own area is the thing that
+      // sets which aircraft can ever appear, and it is not this app's setting.
+      var why = [];
+      if (areaKm) {
+        why.push('This sensor reports aircraft within about ' + distance(areaKm)
+          + ' of home — nothing outside that area reaches the display.');
+      }
+      if (hiddenGround) {
+        why.push(hiddenGround + (hiddenGround === 1 ? ' aircraft on the ground is hidden'
+          : ' aircraft on the ground are hidden') + ' (turn that off in the display settings).');
+      }
+      why.push('To see traffic further out, widen the Flightradar24 integration\'s area '
+        + '(Settings → Devices & services → Flightradar24 → Configure).');
+      showNotice('No aircraft in the sensor area', why.join(' '), false);
     } else {
       notice.hidden = true;
     }
     var stamp = new Date((data.generatedAt ? data.generatedAt * 1000 : Date.now()));
     footLeft.textContent = 'Updated ' + stamp.toLocaleTimeString();
-    footRight.textContent = text(data.entityId, 'sensor') + ' · Flightradar24 via Home Assistant';
+    // The footer says where the aircraft come from and how big that source's area is:
+    // "0 aircraft" and "the sensor only looks 5 km" are very different facts.
+    var source = text(data.entityId, 'sensor');
+    var areaCount = num(data.areaCount);
+    var airborne = num(data.total);
+    var facts = [];
+    if (areaKm) { facts.push('area ≈' + distance(areaKm)); }
+    if (airborne !== null && areaCount !== null) {
+      facts.push(airborne + ' airborne of ' + areaCount);
+    }
+    if (hiddenGround) { facts.push(hiddenGround + ' on the ground hidden'); }
+    footRight.textContent = source + (facts.length ? ' · ' + facts.join(' · ') : '')
+      + ' · Flightradar24 via Home Assistant';
     // Hide the HOME caption when aircraft are directly overhead: its label would be
     // the thing the nearest aircraft's label needs. The dot itself always stays.
     var nearest = null;
@@ -637,7 +706,13 @@
 
   function refresh() {
     fetchData(function (data) {
-      try { render(data); } catch (error) { /* never let one bad payload kill the display */ }
+      try {
+        render(data);
+      } catch (error) {
+        // A render failure must be VISIBLE. Swallowing it leaves a blank scope with no
+        // clue why — which is exactly how a ReferenceError hid itself during development.
+        showNotice('Display error', String(error), true);
+      }
       startBar();
     });
   }

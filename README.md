@@ -5,8 +5,7 @@ kiosk radar. It reads the `flights` list that Home Assistant's Flightradar24 int
 publishes on its *in area* sensor (via the Supervisor API) and draws everything locally — no map
 tiles, no SDK, no external requests from the kiosk.
 
-> **Status: first release (0.1.0), not yet installed on Home Assistant.**
-> It has been run and verified locally against this Home Assistant instance (see *Verified* below).
+> **Status: v0.1.1 — installed and running on Home Assistant.**
 
 ## Start here
 
@@ -19,15 +18,23 @@ tiles, no SDK, no external requests from the kiosk.
 
 ## Verified
 
-* Live Home Assistant read through the same code path the Supervisor API uses (the LAN REST API
-  stands in for `http://supervisor/core/api`): `sensor.flightradar24_current_in_area` is found,
-  `zone.home` supplies the centre, and an empty area renders as "No aircraft overhead".
-* Aircraft positions, bearings, distances, trails, units and label placement were checked against
-  **real Flightradar24 data** (4 and then 12 live aircraft out of FR24's public feed, reshaped into
-  the integration's exact attribute structure): 0 label overlaps, 0 clipped labels, 0 labels over
-  the compass or range text at the default 6 aircraft shown.
-* Screenshots at 1920×1080, 1080×1920 and 3840×2160, plus the admin modal, the unsaved-settings
-  preview and the aircraft detail tap.
+* **Run against this live Home Assistant** (v0.1.1): the display renders the actual aircraft
+  in the sensor's area — 4 at once, from a 25 ft local (departing A320) to a BA 777 at
+  36,000 ft / 47 km — with the sensor's own 100 km × 100 km box drawn and labelled on the
+  scope, and the footer reporting `area ≈50 km · 4 airborne of 4`.
+* **A real bug was found by using real data**: the Flightradar24 integration publishes
+  `on_ground` as an **integer 0/1**, and reading it with a string-only boolean test made `0`
+  look truthy — so "hide aircraft on the ground" (the default) hid *every* aircraft and the
+  display looked empty no matter how far the sensor looked. Fixed in `truthy()`, and the
+  fixture now emits `on_ground` as 0/1 as well so a bool-typed fixture cannot mask it again.
+* The sweep rotates about the centre of the scope: measured through a rotation
+  (177°→333° at ~51°/s, i.e. 7 s per revolution) the leading edge stays 232 px from the
+  scope centre against an invariant of 233 px — 1 px deviation.
+* Label placement, checked numerically in the live page (rect intersections): 0 label
+  overlaps, 0 clipped labels, 0 labels over the compass or the area label, across metric,
+  aviation and imperial displays and a 12-aircraft stress fixture.
+* Screenshots at 1920×1080, 1080×1920 and 3840×2160, plus the admin modal, the
+  unsaved-settings preview and the aircraft detail tap.
 
 Reference implementations to read alongside this one:
 
