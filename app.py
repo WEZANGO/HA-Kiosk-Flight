@@ -61,6 +61,12 @@ DEFAULTS = {
     "title": "",
     "accent": "#7dd3fc",
     "refreshInterval": "20",
+    # The single-aircraft dashboard. `detailAlways` makes this display BE the
+    # dashboard (standalone); the other two are the optional ways in from the
+    # radar — automatically when the sky empties down to one aircraft, or on tap.
+    "detailAlways": "false",
+    "detailAuto": "false",
+    "detailClick": "false",
     # Per-element text sizes, as a percentage of the design size (100 = as designed).
     "sizeCount": "100",
     "sizeTitle": "100",
@@ -69,9 +75,11 @@ DEFAULTS = {
     "sizeDetails": "100",
     "sizeFooter": "100",
     "sizeGrid": "100",
+    "sizeDetail": "100",
 }
 SIZE_KEYS = ("sizeCount", "sizeTitle", "sizeInfo", "sizeCallsign", "sizeDetails",
-             "sizeFooter", "sizeGrid")
+             "sizeFooter", "sizeGrid", "sizeDetail")
+DETAIL_FLAGS = ("detailAlways", "detailAuto", "detailClick")
 SORT_KEYS = ("nearest", "lowest", "highest", "fastest", "callsign")
 UNIT_KEYS = ("metric", "aviation", "imperial")
 CENTRE_KEYS = ("home", "custom")
@@ -337,6 +345,145 @@ def _bounds_parts(bounds: str):
 
 
 # --------------------------------------------------------------------------- #
+# Aircraft type -> schematic
+#
+# The single-aircraft dashboard draws a top-down silhouette of the aircraft type,
+# not a generic plane. No free per-type image database exists — Flightradar24
+# publishes airline logos and photos, neither of which covers "an A321 in side
+# view" — so the artwork is a vendored set of 37 real silhouettes (see
+# vendor/adsb-radar/README.md; icons by ADS-B Radar, https://adsb-radar.com) and
+# the type designator the sensor already gives us (`aircraft_code`, an ICAO type
+# like A320 / B38M / AW189) is matched to the closest one. Matching is therefore
+# at FAMILY level: A321 and A20N both draw the A320 icon. Where nothing matches,
+# the category decides, and a plain twin-jet airliner (`a5`) is the last resort.
+#
+# The names are the icon file stems in web/aircraft_icons.json, and the one that
+# comes back is inlined into the page (never fetched) as row["icon"].
+# --------------------------------------------------------------------------- #
+ICON_BY_CODE = {}
+for _icon, _codes in {
+    # Airbus narrowbody / widebody / quad / superjumbo
+    "a320": ("A318 A319 A320 A321 A19N A20N A21N".split()),
+    "a330": "A300 A306 A30B A310 A332 A333 A337 A338 A339 A33F A358 A359 A35K A35X A3ST".split(),
+    "a340": "A342 A343 A345 A346 A340".split(),
+    "a380": "A380 A388".split(),
+    # Boeing
+    "b737": "B731 B732 B733 B734 B735 B736 B737 B738 B739 B73F B73G B37M B38M B39M B3XM B752 B753 B75F B75M".split(),
+    "b747": "B741 B742 B743 B744 B748 B74D B74F B74S BLCF".split(),
+    "b767": "B762 B763 B764 B767 B76F".split(),
+    "b777": "B772 B773 B777 B778 B779 B77L B77W B77F".split(),
+    "b787": "B787 B788 B789 B78X B781".split(),
+    # McDonnell Douglas / legacy four-engine
+    "md11": "MD11 DC10 MD10".split(),
+    # Regional jets (the A220's shape is closest to an E-Jet)
+    "crjx": "CRJ1 CRJ2 CRJ7 CRJ9 CRJX CL65".split(),
+    "erj": "E135 E140 E145 E35L E45X E50P E55P".split(),
+    "e195": "E170 E75L E75S E190 E195 E290 E295 BCS1 BCS3".split(),
+    "f100": "F70 F100 F28".split(),
+    # Turboprops (high straight wing, T-tail)
+    "dh8a": ("DH8A DH8B DH8C DH8D DH8T DH3T DHC2 DHC3 DHC6 DHC7 DHP8 AT43 AT45 AT46 AT72 AT75 AT76 "
+             "SF34 SB20 SH33 SH36 F27 F50 AN24 AN26 AN32 IL14 JS31 JS32 JS41 L410 B190").split(),
+    # Military / outsize transports
+    "c130": "C130 C30J L100 L382 AN12 AN72 AN74 AN124 AN225 A400 A40M IL76 C5M C17 C141 C160 CN35".split(),
+    # Business jets
+    "glf5": ("GLF2 GLF3 GLF4 GLF5 GLF6 G150 G200 G250 G280 G300 G350 G500 G550 G650 G700 GALX "
+             "GA5C GA6C GA7C GA8C").split(),
+    "fa7x": "FA10 FA20 FA50 FA7X FA8X F900 F2TH F5TH".split(),
+    "learjet": "LJ23 LJ24 LJ25 LJ28 LJ31 LJ35 LJ36 LJ45 LJ55 LJ60 LJ75".split(),
+    "a3": ("CL30 CL35 CL60 GL5T GL7T BD10 BD70 BD71 BD100 H25A H25B H25C H25X HA4T PC24 "
+           "E545 E550 E135BJ E190BJ G200").split(),
+    "a2": "C650 C680 C68A C700 C750 C25A C25B C25C C25M BE40 MU2".split(),
+    "a0": "C500 C501 C510 C525 C550 C551 C560 C56X C550".split(),
+    # Singles and light twins: a straight-wing light aircraft either way
+    "cessna": ("C140 C150 C152 C172 C175 C177 C182 C185 C206 C207 C208 C210 C337 M20P M20T "
+               "P28A P28B P28R P28T PA18 PA24 PA28 PA32 PA38 PA46 SR20 SR22 S22T DA40 DA62 "
+               "BE19 BE33 BE35 BE36 DR40 PC12 TBM7 TBM8 TBM9 TBM85 GA8 E300".split()),
+    "a1": ("BE10 BE20 BE30 BE9L BE9T BE99 B100 B200 B300 B350 C310 C340 C401 C402 C404 C414 "
+           "C421 C425 C441 AC50 AC68 AC90 AC95 AEST ASTR PAY2 PAY3 PAY4 PA31 PA34 PA27 "
+           "SW3 SW4 C90 C90A E110 E120").split(),
+    # Rotary and the rest of the sky
+    "a7": ("A109 A119 A139 A169 A189 AS32 AS35 AS50 AS55 AS65 AS3B AW139 AW189 BK11 BK17 B06 "
+           "B105 B212 B222 B230 B407 B412 B427 B429 B430 B505 BH06 EC20 EC25 EC30 EC35 EC45 "
+           "EC55 EC75 EXPL H47 H53 H60 H125 H135 H145 H160 H175 H215 KA32 LYNX MD52 MI8 MI17 "
+           "MI24 NH90 PUMA R22 R44 R66 S55 S76 S92 UH1 EC35").split(),
+    "a6": "CONC TU144 F16 F18 F15 F22 F35 MIG29 SU27 EF2000 GR4".split(),
+    "b1": "AS25 AS26 ASK2 DG80 DG10 DUOD GLID L13 NIMB".split(),
+    "b4": "MT03 CAV QUIC TRIK".split(),
+}.items():
+    for _code in _codes:
+        ICON_BY_CODE.setdefault(_code, _icon)
+
+# mnemonic icons for the non-fixed-wing categories the sensor may report
+ICON_BY_CATEGORY = {
+    "helicopter": "a7", "rotorcraft": "a7", "gyrocopter": "f15", "autogyro": "f15",
+    "glider": "b1", "sailplane": "b1", "hang glider": "b4", "hangglider": "b4",
+    "paraglider": "f5", "paramotor": "f5", "balloon": "b2", "airship": "b2",
+    "lighter-than-air": "b2", "drone": "b0", "uav": "b0", "multirotor": "c0",
+    "ultralight": "b4",
+}
+
+# Model-text fallback, for the day the sensor reports a code this table has never
+# seen. Ordered: the first pattern that matches wins.
+ICON_BY_MODEL = [
+    # Specific families before the loose number rules below, or "777" would be
+    # swallowed by the generic 7[0-9]{2} pattern first.
+    (r"\bA38[08]\b", "a380"),
+    (r"\bA34[0-9]\b", "a340"),
+    (r"\bA35[0-9X]\b", "a330"),
+    (r"\bA33[0-9]\b", "a330"),
+    (r"\bA31[0-9]\b", "a330"),
+    (r"\bA30[0-9]\b", "a330"),
+    (r"\bA32[01]\b", "a320"),
+    (r"\bA319\b", "a320"),
+    (r"\bA22[0-9]\b", "e195"),
+    (r"\b747\b", "b747"),
+    (r"\b767\b", "b767"),
+    (r"\b777\b", "b777"),
+    (r"\b787\b", "b787"),
+    (r"\b737\b", "b737"),
+    (r"\b7[0-9]{2}\b", "b737"),
+    (r"helicopter|rotorcraft|eurocopter|airbus helicopter|robinson", "a7"),
+    (r"gulfstream|global \d", "glf5"),
+    (r"falcon", "fa7x"),
+    (r"learjet", "learjet"),
+    (r"citation|phenom|hawker|challenger", "a2"),
+    (r"boeing 7|airbus a", "a5"),
+    (r"dash 8|atr \d|twin otter|saab|king air|turboprop", "dh8a"),
+    (r"cessna|piper|cirrus|diamond|pilatus|tbm|socata|eclipse", "cessna"),
+    (r"embraer|erj|legacy", "erj"),
+    (r"md-?1[01]|dc-?10", "md11"),
+    (r"glider|sailplane", "b1"),
+    (r"drone|uav|quadcopter", "b0"),
+]
+
+
+def aircraft_icon(code: str, model: str, category: str) -> str:
+    """Icon name for one aircraft, or "" when there is nothing sensible to draw.
+
+    Order matters: the exact type designator is the most reliable signal, the
+    category next (a helicopter is never an airliner even if its code is odd),
+    then the model's words, then a generic twin-jet airliner.
+    """
+    code = (code or "").strip().upper()
+    model = (model or "").strip()
+    category = (category or "").strip().lower()
+    if code in ("GRND", "GND", "GROUND") or "ground vehicle" in category:
+        # Airport vehicles are sometimes listed as "aircraft" with a position; a
+        # schematic for them would be a lie, so the display falls back to the
+        # plain plane glyph it already has.
+        return ""
+    if code in ICON_BY_CODE:
+        return ICON_BY_CODE[code]
+    for key, icon in ICON_BY_CATEGORY.items():
+        if key in category:
+            return icon
+    for pattern, icon in ICON_BY_MODEL:
+        if re.search(pattern, model, re.I):
+            return icon
+    return "a5"
+
+
+# --------------------------------------------------------------------------- #
 # Flight payload
 # --------------------------------------------------------------------------- #
 def flight_rows(config: dict) -> dict:
@@ -434,7 +581,14 @@ def flight_rows(config: dict) -> dict:
             "flight": as_text(flight.get("flight_number"), 20),
             "registration": as_text(flight.get("aircraft_registration"), 20),
             "airline": as_text(flight.get("airline_short") or flight.get("airline"), 40),
+            # The monogram badge in the single-aircraft view is the airline's own
+            # code — IATA when the sensor has it (two letters, what is painted on
+            # the tail), else ICAO. It is a code, not a name, so it is kept apart
+            # from `airline`.
+            "airlineCode": as_text(flight.get("airline_iata") or flight.get("airline_icao"), 4),
             "type": as_text(flight.get("aircraft_model") or flight.get("aircraft_code"), 40),
+            "code": as_text(flight.get("aircraft_code"), 12),
+            "model": as_text(flight.get("aircraft_model"), 40),
             "category": as_text(flight.get("aircraft_category"), 20),
             "originCode": as_text(flight.get("airport_origin_code_iata")
                                   or flight.get("airport_origin_code_icao"), 8),
@@ -455,6 +609,7 @@ def flight_rows(config: dict) -> dict:
         }
         row["name"] = (row["callsign"] or row["flight"] or row["registration"]
                        or "Unknown flight")
+        row["icon"] = aircraft_icon(row["code"], row["model"], row["category"])
         trail = []
         for point in (flight.get("coordinates") or [])[-40:]:
             if not isinstance(point, (list, tuple)) or len(point) < 2:
@@ -590,7 +745,7 @@ def clean_display(payload: dict, existing: dict = None) -> dict:
     combined["accent"] = accent if re.fullmatch(r"#[0-9a-fA-F]{6}", accent or "") else DEFAULTS["accent"]
     combined["title"] = as_text(combined.get("title"), 60)
     for key in ("hideOnGround", "showRoute", "showType", "showSpeed", "showDistance",
-                "showTrails", "showRings", "showSweep", "showPulse"):
+                "showTrails", "showRings", "showSweep", "showPulse") + DETAIL_FLAGS:
         combined[key] = "true" if truthy(combined.get(key)) else "false"
     values.update(combined)
     return values
@@ -615,10 +770,34 @@ def build_config(display: dict) -> dict:
     return config
 
 
+_ICONS: dict | None = None
+
+
+def aircraft_icons_json() -> str:
+    """The vendored aircraft silhouettes, as JSON for the display page to inline.
+
+    Embedded rather than fetched on purpose: the page must work with no network
+    at all, and the admin's unsaved-settings preview renders it from `srcdoc`,
+    where there is no base URL to fetch anything from. ~64 KB of paths, read once
+    (the file ships inside the app and cannot change while it runs).
+
+    Only `</` is escaped — a JSON string inside <script> ends the block if it
+    carries one, and the SVG markup has plenty of `<` that need not be escaped.
+    """
+    global _ICONS
+    if _ICONS is None:
+        try:
+            _ICONS = json.loads((DISPLAY_FILE.parent / "aircraft_icons.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            _ICONS = {}
+    return json.dumps(_ICONS, separators=(",", ":"), sort_keys=True).replace("</", "<\\/")
+
+
 def render_display(display: dict, data: dict = None) -> str:
     config = build_config(display)
     injected = json.dumps(config).replace("<", "\\u003c")
     flags = f"<script>window.KIOSK_FLIGHT_CONFIG={injected};</script>"
+    flags += f"<script>window.KIOSK_FLIGHT_ICONS={aircraft_icons_json()};</script>"
     if data is not None:
         flags += ("<script>window.KIOSK_FLIGHT_DATA="
                   + json.dumps(data).replace("<", "\\u003c") + ";</script>")
@@ -676,6 +855,8 @@ button{border:0;background:#38bdf8;color:#082f49;font-weight:700;cursor:pointer}
 <p>Full-screen displays of the aircraft flying over your house. Data comes from the
 <strong>Flightradar24</strong> integration you have running in Home Assistant (Settings → Devices &amp; services)
 and is read server-side, so a kiosk on a network with no internet needs nothing else.</p>
+<p class="hint">Aircraft type icons by <a href="https://adsb-radar.com" rel="noopener">ADS-B Radar for macOS</a>
+(used with a backlink, as its licence asks).</p>
 <section><h2>New display</h2><button id="new-display">＋ Add a full-screen flight display</button></section>
 <section><h2>Your displays</h2><p class="sensor-summary" id="sensor-summary">Checking the sensor…</p>
 <div id="list">Loading…</div></section>
@@ -716,6 +897,17 @@ Devices &amp; services → Flightradar24 → Configure. The radar range below is
 <label class="check"><input type="checkbox" name="showRings" data-flag> Range rings</label>
 <label class="check"><input type="checkbox" name="showSweep" data-flag> Radar sweep</label>
 <label class="check"><input type="checkbox" name="showPulse" data-flag> Home-marker ripple</label>
+<h3>Single-aircraft dashboard</h3>
+<p class="hint wide">A second, full-screen view for <strong>one</strong> aircraft: its flight number, altitude,
+origin → destination, a top-down schematic of the type and the airline's code badge. It is the closest
+aircraft, and it refreshes with the radar.</p>
+<label class="check"><input type="checkbox" name="detailAlways" data-flag> This display IS the dashboard
+  (standalone — no radar)</label>
+<label class="check"><input type="checkbox" name="detailAuto" data-flag> Switch to it when only one aircraft is left</label>
+<label class="check"><input type="checkbox" name="detailClick" data-flag> Open it when an aircraft is tapped
+  (tap again to go back)</label>
+<p class="hint wide">Left unticked, the display is the radar exactly as before. The three are
+independent: a standalone dashboard can also be one whose radar comes back when the sky fills up.</p>
 <h3>Where it is centred</h3>
 <label>Centre<select name="centreMode" id="centre-mode">
   <option value="home">Home — the zone.home location in Home Assistant</option>
@@ -742,6 +934,9 @@ Devices &amp; services → Flightradar24 → Configure. The radar range below is
 <label class="slider-field">Compass &amp; area labels<output id="size-grid-out">100%</output>
   <div class="slider-row"><input type="range" name="sizeGrid" min="50" max="300" step="5" value="100"
     data-out="size-grid-out" oninput="syncOut(this)"></div></label>
+<label class="slider-field">Single-aircraft dashboard<output id="size-detail-out">100%</output>
+  <div class="slider-row"><input type="range" name="sizeDetail" min="50" max="300" step="5" value="100"
+    data-out="size-detail-out" oninput="syncOut(this)"></div></label>
 <label class="slider-field">Credit line<output id="size-footer-out">100%</output>
   <div class="slider-row"><input type="range" name="sizeFooter" min="50" max="300" step="5" value="100"
     data-out="size-footer-out" oninput="syncOut(this)"></div></label>
@@ -795,6 +990,7 @@ function resetForm(){
     if(el.getAttribute&&el.getAttribute('data-flag')!==null&&el.type==='checkbox')el.checked=true}
   field('accent','#7dd3fc');field('maxFlights','6');field('rangeKm','0');field('refreshInterval','20');
   field('sortBy','nearest');field('units','metric');field('centreMode','home');field('showType','false');
+  field('detailAlways','false');field('detailAuto','false');field('detailClick','false');
   syncOutputs();
 }
 function syncFlags(){for(var i=0;i<f.elements.length;i++){var el=f.elements[i];

@@ -531,6 +531,45 @@ machine with internet hides leaks:
 Target: `direct: 0`. Also assert the guards from the shell — an off-allowlist host and a `file://`
 URL must both return 400.
 
+### 6.4 Vendoring beats proxying when the asset set is small and static
+
+Some external things have no reason to be fetched at all. A small, fixed artwork set (icons,
+glyphs, a flag set) is one of them: fetch it *once, at development time*, and ship it inside the
+add-on. That is strictly better than a runtime proxy — it works with no internet anywhere, it
+cannot fail at 3 a.m., and it survives the admin's `srcdoc` preview (which has **no base URL**, so
+an `<img src="/icons/a320.svg">` in the preview resolves against the wrong origin and 404s even
+when the real display is fine).
+
+The pattern, exactly as used by the aircraft schematics in this repo:
+
+1. **Vendor the artwork with its licence**, untouched, under `vendor/<source>/`, plus a `README.md`
+   recording the source URL, the verbatim licence terms, and *where the required attribution
+   lives* in this repo. Check that requirement **before** you build on the set — "free for
+   commercial use" and "free with a backlink" are different projects, and a backlink is easy to
+   forget until it is the only thing standing between you and a takedown.
+2. **Normalise with a build script** (`tools/build_*.py`) into a single generated file the app
+   reads — here `web/aircraft_icons.json`, a name → SVG-string map:
+   * strip the editor cruft (XML declaration, `width`/`height`, `<defs>` grid guides, foreign
+     namespaces) but KEEP `viewBox` + `preserveAspectRatio`, so CSS controls the size;
+   * rewrite every colour to `currentColor` **and put `fill="currentColor"` on the root element**:
+     icons that declare no `fill` at all inherit SVG's default **black**, which is invisible on a
+     dark kiosk and looks fine in a JSON diff. (This bit: half the set rendered black until the
+     contact sheet was actually looked at.)
+   * minify, and print the total size so a runaway asset set is visible immediately.
+3. **Commit the generated file** so the image builds without anyone running the build step, and
+   say in the docs that the script must be re-run when the artwork changes.
+4. **Inline it into the page** rather than linking it: `render_display()` adds
+   `<script>window.X_ICONS={…}</script>` beside the config. Escape only `</` (a JSON string inside
+   a `<script>` ends the block on it; the `<` of every SVG tag is fine as-is). ~65 KB of paths on a
+   LAN is nothing, and it is the same bytes the `srcdoc` preview needs.
+5. **Map data → asset server-side**, in the app, not in the client: the client gets `icon: "a320"`
+   per row and looks it up. Keep the mapping table ordered by reliability (exact code → category →
+   keyword in the model name → generic fallback) and write the fallback's reasoning in a comment —
+   a generic silhouette is honest, a wrong one is not.
+
+**When to proxy instead:** anything unbounded or user-supplied (map tiles, arbitrary article
+images, per-request queries). Vendoring is for a closed set that fits in the repo.
+
 ---
 
 ## 7. Local testing & verification workflow

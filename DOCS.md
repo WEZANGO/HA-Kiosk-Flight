@@ -25,6 +25,25 @@ range 35 km
 Tap any aircraft to get its details (registration, type, route, exact altitude/speed/bearing) in a
 line at the bottom.
 
+There is also a second, full-screen view for **one** aircraft — the **single-aircraft dashboard**:
+
+```
+              ┌────┐
+              │ EI │  Aer Lingus          ← airline badge (its own code, coloured per airline)
+              └────┘
+              EI725                       ← flight number
+                ✈                         ← top-down schematic of the aircraft TYPE
+           Airbus A320-251N  A20N
+              ALTITUDE
+               777 m
+          LHR   →   ORK                   ← origin → destination
+        London       Cork
+```
+
+It can *be* a display (a standalone dashboard), or the radar can hand over to it when the sky
+has emptied down to a single aircraft, or when an aircraft is tapped. Those three are
+independent settings, all off by default.
+
 ---
 
 ## Install
@@ -85,8 +104,35 @@ The shared access token lives in `/data/access_token` — deliberately **not** i
 | Flight trails, Range rings, Radar sweep, Home-marker ripple | cosmetics |
 | Home-marker ripple | the slow expanding ring at the home marker. It expands with a composited transform, is invisible at both ends of its loop and stays invisible for the first 10% of each cycle, so the restart cannot twitch; turn it off entirely if you prefer a still marker |
 | Centre | `zone.home` or custom coordinates |
-| Accent colour | drives the aircraft glyphs, trails, range rings, compass, the sweep and the home-marker glow (the nearest aircraft is drawn in a lightened version of it) |
-| Text sizes | seven sliders — overhead count, headline, info lines, aircraft callsign, aircraft detail lines, compass & area labels, credit line — each 50–300% of the design size, applied per element |
+| Accent colour | drives the aircraft glyphs, trails, range rings, compass, the sweep, the home-marker glow **and the dashboard's schematic/arrow/glow** (the nearest aircraft is drawn in a lightened version of it). The airline badge keeps its own per-airline colour, because that one identifies the airline |
+| Text sizes | eight sliders — overhead count, headline, info lines, aircraft callsign, aircraft detail lines, compass & area labels, single-aircraft dashboard, credit line — each 50–300% of the design size, applied per element. The dashboard slider scales its whole layout in one move |
+| **Single-aircraft dashboard** — *This display IS the dashboard* | the display shows nothing but the dashboard, full screen (a standalone dashboard) |
+| **Single-aircraft dashboard** — *Switch to it when only one aircraft is left* | the radar hands over automatically when exactly one aircraft is in the area, and comes back when a second appears |
+| **Single-aircraft dashboard** — *Open it when an aircraft is tapped* | a tap opens the dashboard for **that** aircraft instead of the bottom detail strip; a tap on the dashboard returns to the radar. If the tapped aircraft leaves the area, the radar comes back |
+
+All three dashboard switches are off by default, so an existing display never changes behaviour on
+upgrade. Ticked together they combine: a display that is a dashboard, whose radar returns whenever
+the sky fills up again.
+
+### The single-aircraft dashboard
+
+One aircraft, the whole screen, refreshed on the same interval as the radar:
+
+* **the airline** as a coloured monogram badge built from its own two-letter code, with the airline
+  name beside it — no logo is fetched from anywhere, and the colour is derived from the code so the
+  same airline always looks the same;
+* **the flight number** (`flight_number`, falling back to the callsign);
+* **a top-down schematic of the aircraft type** (below);
+* **the altitude**, in the display's units — or `ON THE GROUND` for a taxiing aircraft;
+* **origin → destination**, IATA codes with the city underneath.
+
+Which aircraft it shows: the **closest** one (by distance from the display's centre) — unless it was
+opened by a tap, in which case it follows that aircraft until it leaves the area. The radar's sort
+order does not change this: "closest" is the point of the view.
+
+No aircraft in the area, and the dashboard says so rather than showing empty fields; if the sensor
+itself is broken (missing entity, no `flights` list), the dashboard prints the reason — a display
+set to be a dashboard must never fail silently.
 
 The screen itself keeps to: the aircraft count and info lines top-left, the scope, and a single
 credit line (`Flightradar24 via Home Assistant`) bottom-right. There is no timestamp, no
@@ -114,6 +160,11 @@ needs nothing but this app:
 * the radar, glyphs, fonts and colours are all local — **the display page makes zero external
   requests**. There is deliberately no generic proxy endpoint: there is nothing to proxy, and an
   unused open relay is a liability.
+* the aircraft **schematics** are vendored artwork, inlined into the page as JSON by the app
+  (`web/aircraft_icons.json`) rather than linked as `<img src>` — so the same page also renders
+  correctly from the admin's `srcdoc` preview, which has no base URL to fetch from.
+* the airline is a **monogram badge**, coloured from the airline's own code: a real logo would be
+  one more third-party fetch (and a trademark question) for a display that needs neither.
 
 What the app does **not** do: it does not call Flightradar24 itself, and it cannot widen
 what the sensor reports.
@@ -150,12 +201,47 @@ the only aircraft in it are on the ground. All three are visible on the page now
 
 Per aircraft, from the sensor's `flights` attribute:
 `callsign`, `flight_number`, `aircraft_registration`, `aircraft_code`/`aircraft_model`, `airline`,
-`airport_origin_code_iata`, `airport_destination_code_iata` (+ city names), `latitude`, `longitude`,
-`altitude` (ft), `heading` (deg), `ground_speed` (kt), `vertical_speed` (ft/min), `on_ground`,
-`coordinates` (trail), and `bounds` on the sensor for the automatic range.
+`airline_iata`/`airline_icao`, `airport_origin_code_iata`, `airport_destination_code_iata`
+(+ city names), `latitude`, `longitude`, `altitude` (ft), `heading` (deg), `ground_speed` (kt),
+`vertical_speed` (ft/min), `on_ground`, `coordinates` (trail), and `bounds` on the sensor for the
+automatic range. `aircraft_category` decides the schematic class for anything that is not a
+fixed-wing aeroplane (helicopter, glider, balloon, drone).
 
 Distances and bearings are recomputed here from the display's own centre, so a display centred
 somewhere else (not `zone.home`) is still correct.
+
+## Aircraft icons and the type schematic
+
+The dashboard draws a top-down silhouette of the aircraft **type**, matched from the ICAO type
+designator the sensor already reports (`aircraft_code`: `A320`, `B38M`, `AW189`, …).
+
+There is no free, offline, per-type image database to look this up in — Flightradar24 publishes
+airline logos and photographs, neither of which answers "what does an A321 look like from above"
+— so the app **vendors** a set of 37 real silhouettes:
+
+> Icons by **ADS-B Radar** for macOS — <https://adsb-radar.com> —
+> <https://apps.apple.com/app/id1538149835>
+>
+> Free for personal and commercial use; the requirement is the backlink above, which lives in
+> `README.md`, in this file, on the app's own admin page and in both displays' credit line.
+
+* Artwork: `vendor/adsb-radar/*.svg` (unmodified, with the package's own readme), plus a note in
+  `vendor/adsb-radar/README.md` on why this set and what the licence requires.
+* Build step: `python3 tools/build_aircraft_icons.py` turns them into `web/aircraft_icons.json`
+  (strips the editor's grid guides, recolours every fill/stroke to `currentColor`, minifies).
+  **Re-run it if you add or change an icon.** The app reads that JSON at startup and inlines it
+  into the display page, so the kiosk never fetches an image and the admin's `srcdoc` preview
+  works too.
+* Matching (`ICON_BY_CODE` / `ICON_BY_CATEGORY` / `ICON_BY_MODEL` and `aircraft_icon()` in `app.py`)
+  is at **family level**, which is what
+  a type designator can honestly support: `A321` and `A20N` both draw the A320 icon, `B38M` and
+  `B739` the 737, `AW189`/`EC35`/`R44` the helicopter. The order is type designator → category →
+  the words in `aircraft_model` → a generic twin-jet airliner (`a5`).
+* Airport **ground vehicles** (`GRND`) get no schematic on purpose: drawing an aeroplane for a
+  fuel truck would be a lie, so the dashboard falls back to the plain plane glyph.
+
+If your area turns up a type that is obviously mismatched, add its designator to the table in
+`app.py` and mention it — the table is meant to grow.
 
 ## Troubleshooting
 
@@ -167,16 +253,26 @@ somewhere else (not `zone.home`) is still correct.
 | Widened the area and still nothing | check the footer: `N on the ground hidden` means every flight in the area is taxiing, and `0 airborne of 0` means the box is genuinely quiet. The dashed box on the scope shows exactly how far the sensor looks |
 | "Reading Home Assistant entities needs the homeassistant_api permission" | the app is running outside Home Assistant, or `homeassistant_api: true` was removed from `config.yaml` |
 | Display shows a 401 | direct URL without `?auth=…` — copy the link from the admin page instead of typing it |
-| "Display error" on screen | a client-side render failure. It is shown deliberately: a swallowed error used to leave a blank scope with no explanation |
+| "Display error" on screen | a client-side render failure. It is shown deliberately: a swallowed error used to leave a blank scope with no explanation. On a display set to be a dashboard the radar is brought forward to show it, because the dashboard covers the notice |
+| The dashboard shows "NO AIRCRAFT IN THE AREA" | exactly that: nothing airborne in the sensor's own area (the same condition as the empty radar, which prints the full explanation) |
+| The dashboard shows a twin-jet airliner for something odd | the type is not in the icon table and nothing in the category or model matched, so `a5` is the deliberate last resort — add the designator to `ICON_BY_CODE` in `app.py` |
+| Tapping an aircraft opens a different one's dashboard | the tap landed on a label that overlaps the glyph; the label is what is on top, so it is what opens |
+| The dashboard is on screen for the wrong aircraft | it shows the **closest** aircraft unless it was opened by a tap; a tapped aircraft is followed until it leaves the area |
 
 ## Design rules this app follows
 
-* Single `app.py` (Python stdlib only) + `web/display.html` + `run.sh` + `config.yaml` +
-  `Dockerfile` + `repository.yaml`.
-* Full-screen only — no card variant, and one flat settings set (no per-variant fields).
+* Single `app.py` (Python stdlib only) + `web/display.html` (both views) + `web/aircraft_icons.json`
+  (generated) + `run.sh` + `config.yaml` + `Dockerfile` + `repository.yaml`, with the icon artwork
+  and its build script under `vendor/` and `tools/` (neither ships in the image).
+* Full-screen only — no card variant, and one flat settings set (no per-variant fields). The
+  single-aircraft dashboard is a *view of the same display*, not a second display type: it inherits
+  the display's sensor, units and refresh interval.
 * Pages are served `Cache-Control: no-store`: a cached display page is exactly what keeps a kiosk
   stuck on old client code.
 * Client JS stays conservative (ES2017 at most): `??`, `?.` and `matchAll` kill the whole script on
-  an old kiosk WebView, not just their own line. No external resources, so nothing to fail.
+  an old kiosk WebView, not just their own line. No external resources, so nothing to fail — the
+  aircraft schematics are inlined into the page for the same reason.
+* Third-party artwork is vendored with its licence and its required attribution; the generated file
+  (`web/aircraft_icons.json`) is committed so the image builds without the build step ever running.
 * Version bumped in **both** `config.yaml` and the Dockerfile `io.hass.version` label on every
   change.

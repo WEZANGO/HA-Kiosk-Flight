@@ -5,7 +5,16 @@ kiosk radar. It reads the `flights` list that Home Assistant's Flightradar24 int
 publishes on its *in area* sensor (via the Supervisor API) and draws everything locally — no map
 tiles, no SDK, no external requests from the kiosk.
 
-> **Status: v0.1.1 — installed and running on Home Assistant.**
+It has two full-screen views, from one display and one settings set:
+
+* the **radar** — every aircraft in the sensor's area, plotted and labelled;
+* the **single-aircraft dashboard** — the whole screen for one aircraft: its airline badge and
+  name, flight number, a top-down **schematic of the aircraft type**, altitude and
+  origin → destination. It can *be* the display (standalone), or the radar can switch to it
+  automatically when only one aircraft is left, or when an aircraft is tapped.
+
+> **Status: v0.2.0 — the dashboard was added and verified against live traffic; the v0.1.x radar
+> behaviour is unchanged.**
 
 ## Start here
 
@@ -13,10 +22,61 @@ tiles, no SDK, no external requests from the kiosk.
 |---|---|
 | `DOCS.md` | the human-facing documentation: install, settings, how it works, troubleshooting |
 | `HOME_ASSISTANT_ADDON_GUIDE.md` | the handoff guide this app was built from: file skeleton, settings design, the three auth channels, local testing, shipping conventions |
-| `app.py` | single-file stdlib-only server: display store, admin UI, display page, APIs |
-| `web/display.html` | the kiosk page — local SVG radar, aircraft plots, tap-for-detail |
+| `app.py` | single-file stdlib-only server: display store, admin UI, display page, APIs, the aircraft-type → icon table |
+| `web/display.html` | the kiosk page — local SVG radar **and** the single-aircraft dashboard, tap-for-detail |
+| `web/aircraft_icons.json` | generated: the aircraft silhouettes, inlined into the page (never fetched) |
+| `vendor/adsb-radar/` | the vendored icon artwork, its licence and the attribution it requires |
+| `tools/build_aircraft_icons.py` | re-normalises the artwork into `web/aircraft_icons.json` |
+
+## Aircraft icons
+
+The aircraft schematics are **not** mine and are not free-floating: they come from
+[ADS-B Radar for macOS](https://adsb-radar.com) (37 top-down aircraft silhouettes, free for
+personal and commercial use in exchange for a backlink), the same terms are repeated in
+`vendor/adsb-radar/README.md`, `DOCS.md`, the app's admin page and the credit line of both
+views. Nothing else in this repo is third-party.
 
 ## Verified
+
+*(Everything below is measured against the running app; v0.2.0 additions are marked.)*
+
+* **The single-aircraft dashboard, driven in a real browser against this live Home Assistant**
+  (1920×1080, 1080×1920 and the admin modal; 23 assertions, all passing): the standalone
+  dashboard renders with the radar hidden, every field populated from real traffic
+  (`EI725 / Airbus A320-251N / 777 m / LHR London → ORK Cork`, badge `EI`), the schematic is a
+  real SVG drawing sized inside the viewport, the credit line carries the required attribution,
+  the size slider scales every size by exactly 2.00×, and nothing throws in the page.
+* **The three ways in were each exercised**, not just wired up: auto mode stays on the radar with
+  281 aircraft in the area and switches to the dashboard when the same live payload is one
+  aircraft (fixture = the live payload truncated, marked as such); a **real mouse click** on a
+  label opens the dashboard for *that* aircraft (asserted against the payload's own flight number
+  for the tapped callsign); a click on the dashboard returns to the radar; and a display pointed at
+  a non-existent sensor shows the reason **on the dashboard** instead of a blank screen.
+* **The layout collision that a screenshot caught**: in landscape the centred block reached the
+  credit line and printed through it (content ended at 952 px, credit started at 995 px after the
+  fix, in portrait 1372/1835) — now asserted as a rectangle test at both aspect ratios.
+* **A silent JS error was found and fixed by this exercise**: the dashboard's DOM helper was named
+  `detailRows`, which the radar already used for its bottom strip — the later declaration wins at
+  *every* call site, so the dashboard called the strip's version with no aircraft and threw on
+  `flight.registration`. The whole render died and the error was reported on the radar the
+  dashboard was covering; `showNotice()` now brings the radar forward for an error, so a render
+  failure can never be invisible again.
+* **The admin round trip, through the real modal**: add a display → tick *standalone* and
+  *auto*, set the dashboard slider to 150% → Save → stored as `detailAlways=true`,
+  `detailAuto=true`, `detailClick=false`, `sizeDetail=150` → reopen shows switches and readout
+  restored → the saved display renders as a dashboard with `--ds: 1.5` applied.
+* **The icon pipeline**: all 37 vendored SVGs are re-normalised to `currentColor` and rendered as
+  a contact sheet (they first came out **half black** — most icons declare no `fill` at all, so
+  without `fill="currentColor"` on the root they inherit SVG's default black; caught by looking at
+  the sheet, not by asserting the JSON was non-empty).
+* **Type matching against 281 live aircraft**: `BE20` → light twin, `A189` → helicopter,
+  `A320`/`A20N`/`A21N` → A320, `B38M`/`B738` → 737, `AT76` → Dash 8/ATR — checked by printing the
+  resolved icon per live row, not by reading the table.
+* The v0.1.x radar behaviour was re-checked in the same run (radar visible with the dashboard
+  hidden, 12 plots labelled, no page errors) — adding a second view did not disturb the first.
+* **Earlier, v0.1.x evidence** (unchanged by this work) follows.
+
+### Earlier evidence (v0.1.x)
 
 * **Run against this live Home Assistant** (v0.1.1): the display renders the actual aircraft
   in the sensor's area — 4 at once, from a 25 ft local (departing A320) to a BA 777 at
@@ -73,5 +133,19 @@ Reference implementations to read alongside this one:
 * Label placement is scored, not greedy: `placementCost()` prefers free space, treats the compass
   letters and range labels as expensive obstacles, and penalises running off the scope. The range
   labels themselves are placed in the quadrant furthest from every aircraft.
+* **A third-party asset set is vendored, never fetched.** The aircraft schematics are files in
+  `vendor/` re-normalised by `tools/build_aircraft_icons.py` into one JSON map that the app inlines
+  into the page. Inlining is the load-bearing decision, not a nicety: the admin's unsaved-settings
+  preview renders the page from `srcdoc`, where there is no base URL to fetch an `<img src>` from,
+  and the kiosk VLAN has no internet at all. Check the licence's attribution requirement *before*
+  wiring the artwork in — here it is a backlink, and it lives in four places (see DOCS.md).
+* **`display.html` is one flat IIFE**: a name declared twice silently overrides at *every* call
+  site (function declarations hoist). A new `detailRows()` for the dashboard collided with the
+  radar's own `detailRows(flight)`, so the dashboard called the strip's version and threw on the
+  first undefined field — a total render failure reported by an error notice the dashboard was
+  covering. Before adding a helper, grep the page for the name; check the console (`window.__errors`)
+  in any UI verification run, and never let an error state live on a view the current mode hides.
+* **A view that a mode hides is a view whose errors are hidden too.** `showNotice(…, isError=true)`
+  now switches back to the radar first, so a client-side render failure is always readable.
 * Any sensor in Home Assistant that publishes a `flights` list with positions can drive a display —
   the sensor picker is not hard-coded to Flightradar24.

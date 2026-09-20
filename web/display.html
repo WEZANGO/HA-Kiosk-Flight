@@ -118,6 +118,79 @@
     font-family:ui-monospace,Menlo,Consolas,monospace}
   #detail .d-rows span{margin:0 1.4vmin}
   @media (max-aspect-ratio:1/1){#hud{max-width:80vmin}#count{font-size:9vmin}}
+  /* ---------------------------------------------------------------------- */
+  /* The single-aircraft dashboard.                                        */
+  /*                                                                       */
+  /* A second full-screen view, not a panel over the radar: it replaces the */
+  /* whole screen for one aircraft (the closest one, or the one that was    */
+  /* tapped). #ds is the "Single-aircraft dashboard" text-size slider, and  */
+  /* every size below is expressed as a multiple of the design size so one  */
+  /* property scales the lot.                                              */
+  /* ---------------------------------------------------------------------- */
+  :root{--ds:1}
+  #acdetail{position:fixed;inset:0;display:none;flex-direction:column;
+    align-items:center;justify-content:center;text-align:center;
+    /* The bottom padding is not decoration: the centred block is tall, and on a
+       wide-and-short kiosk (1920x1080) it reached the credit line and printed
+       through it. Reserving the footer band in the padding keeps the two apart
+       at every aspect ratio. */
+    padding:4vmin 4vmin 12vmin;box-sizing:border-box;overflow:hidden;
+    background:
+      radial-gradient(120% 120% at 50% 45%, rgba(56,189,248,.08) 0%, rgba(5,8,15,0) 60%),
+      linear-gradient(180deg,#070c16 0%,#04070d 60%,#03050a 100%)}
+  body.detail #acdetail{display:flex}
+  body.detail #radar,body.detail #hud,body.detail #foot,
+  body.detail #detail,body.detail #scrim{display:none}
+  #acdetail .ad-inner{display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:2.2vmin;max-width:96vw}
+  /* Airline: a coloured monogram badge built from the airline's own code, plus  */
+  /* its name. The colour is derived from the code in JS, so two airlines are    */
+  /* never the same colour and no logo has to be fetched from anywhere.          */
+  #acdetail .ad-airline{display:flex;align-items:center;gap:2vmin}
+  #acdetail .ad-badge{width:calc(9vmin * var(--ds));height:calc(9vmin * var(--ds));
+    border-radius:calc(1.6vmin * var(--ds));display:flex;align-items:center;
+    justify-content:center;font-family:ui-monospace,Menlo,Consolas,monospace;
+    font-weight:700;font-size:calc(3.6vmin * var(--ds));letter-spacing:.04em;
+    color:#05080f;background:#9fd8ff;box-shadow:0 0 3vmin rgba(125,211,252,.25)}
+  #acdetail .ad-airline-text{text-align:left;line-height:1.25;max-width:56vmin}
+  #acdetail .ad-airline-name{font-size:calc(3vmin * var(--ds));color:#e8f1ff;
+    font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #acdetail .ad-flight{font-size:calc(10.5vmin * var(--ds));line-height:1;
+    font-weight:700;letter-spacing:.02em;color:#f4fbff;
+    font-family:ui-monospace,Menlo,Consolas,monospace;
+    text-shadow:0 0 4vmin rgba(125,211,252,.35)}
+  #acdetail .ad-schematic{height:calc(28vmin * var(--ds));color:#9fd8ff;
+    display:flex;align-items:center;justify-content:center;
+    filter:drop-shadow(0 0 2.2vmin rgba(125,211,252,.35))}
+  /* The source art has a different viewBox (and aspect) per icon, so the icon  */
+  /* is given a square box and `preserveAspectRatio` centres it inside.         */
+  #acdetail .ad-schematic svg{height:100%;width:calc(44vmin * var(--ds));display:block}
+  #acdetail .ad-type{font-size:calc(3.4vmin * var(--ds));color:#dbeafe;
+    letter-spacing:.02em}
+  #acdetail .ad-type .ad-code{color:#8fb6d4;margin-left:1.4vmin;
+    font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.8em}
+  #acdetail .ad-alt{font-size:calc(6vmin * var(--ds));color:#ffffff;font-weight:600;
+    font-family:ui-monospace,Menlo,Consolas,monospace;
+    text-shadow:0 0 3vmin rgba(125,211,252,.3)}
+  #acdetail .ad-alt .ad-alt-label{display:block;font-size:calc(1.8vmin * var(--ds));
+    font-weight:400;letter-spacing:.3em;color:#8fb6d4;margin-bottom:.9vmin}
+  #acdetail .ad-route{display:flex;align-items:center;justify-content:center;
+    gap:2vmin;flex-wrap:wrap;margin-top:1vmin}
+  #acdetail .ad-end{min-width:22vmin}
+  #acdetail .ad-end .ad-code{display:block;font-size:calc(6.4vmin * var(--ds));
+    font-weight:700;color:#ffffff;font-family:ui-monospace,Menlo,Consolas,monospace}
+  #acdetail .ad-end .ad-city{display:block;font-size:calc(2.3vmin * var(--ds));
+    color:#a8cde8;margin-top:.6vmin}
+  #acdetail .ad-arrow{font-size:calc(4.6vmin * var(--ds));color:#7dd3fc}
+  #acdetail .ad-foot{position:absolute;left:0;right:0;bottom:2.4vmin;text-align:center;
+    font-size:calc(1.6vmin * var(--ds));color:#8fb6d4;
+    font-family:ui-monospace,Menlo,Consolas,monospace;line-height:1.7}
+  #acdetail .ad-foot a{color:#8fb6d4}
+  #acdetail .ad-empty{font-size:calc(3vmin * var(--ds));letter-spacing:.28em;color:#dcecf8}
+  /* Several of these boxes are flex containers, and an author `display:flex`
+     beats the user-agent `[hidden]{display:none}` — so hiding one would do
+     nothing. Say it explicitly. */
+  #acdetail [hidden]{display:none !important}
   /* Respect reduced-motion (and settle quickly when a page is captured headlessly). */
   @media (prefers-reduced-motion:reduce){
     #sweep{animation:none;opacity:.3}
@@ -143,6 +216,30 @@
 <div id="scrim"></div>
 <div id="detail" hidden><div class="d-call"></div><div class="d-route"></div>
   <div class="d-rows"></div></div>
+<!-- The single-aircraft dashboard: the whole screen for one aircraft. Shown when
+     the display is set to be one, when the sky drops to a single aircraft, or
+     when an aircraft is tapped (all optional — see the app's settings). -->
+<div id="acdetail">
+  <div class="ad-inner">
+    <div class="ad-airline"><div class="ad-badge"></div>
+      <div class="ad-airline-text"><div class="ad-airline-name"></div></div></div>
+    <div class="ad-flight"></div>
+    <div class="ad-schematic"></div>
+    <div class="ad-type"><span class="ad-model"></span><span class="ad-code"></span></div>
+    <div class="ad-alt"><span class="ad-alt-label">ALTITUDE</span>
+      <span class="ad-alt-value"></span></div>
+    <div class="ad-route">
+      <div class="ad-end ad-from"><span class="ad-code"></span><span class="ad-city"></span></div>
+      <div class="ad-arrow">→</div>
+      <div class="ad-end ad-to"><span class="ad-code"></span><span class="ad-city"></span></div>
+    </div>
+    <div class="ad-empty" hidden>NO AIRCRAFT IN THE AREA</div>
+  </div>
+  <div class="ad-foot">
+    <div>Flightradar24 via Home Assistant</div>
+    <div>Aircraft icons by ADS-B Radar — <a href="https://adsb-radar.com" rel="noopener">adsb-radar.com</a></div>
+  </div>
+</div>
 <script>
 (function () {
   var CFG = window.KIOSK_FLIGHT_CONFIG || {};
@@ -205,6 +302,9 @@
   var foot = document.getElementById('foot');
   var detail = document.getElementById('detail');
   var pulse = document.querySelector('.home-pulse');
+  // The single-aircraft dashboard (see the comment on #acdetail in the markup).
+  var acdetail = document.getElementById('acdetail');
+  var ICONS = window.KIOSK_FLIGHT_ICONS || {};
 
   var size = 600;          // radar square, in px
   var centre = { x: 300, y: 300 };
@@ -216,6 +316,187 @@
   var selected = -1;
   var refreshSeconds = Math.max(5, num(CFG.refreshInterval) || 20);
   var timer = null;
+
+  // --------------------------------------------------------------------------- //
+  // Single-aircraft dashboard
+  //
+  // One aircraft, full screen: airline badge + name, flight number, a top-down
+  // schematic of the type, altitude and origin → destination. It is either the
+  // display's whole job (`detailAlways`) or a view the radar hands over to, on a
+  // tap (`detailClick`) or when the sky has emptied down to a single aircraft
+  // (`detailAuto`).
+  //
+  // `flag()` not `on()` for these three: `on()` treats a missing value as true,
+  // which is right for the cosmetics (they default to on) and catastrophic here
+  // — an unset flag would turn every radar into a dashboard.
+  // --------------------------------------------------------------------------- //
+  function flag(value) { return String(value) === 'true'; }
+  var view = flag(CFG.detailAlways) ? 'detail' : 'radar';
+  var detailTarget = '';    // callsign/name of a tapped aircraft; '' = the closest
+  var loaded = false;       // has a data payload arrived yet
+
+  function closestFlight(flights) {
+    var best = null;
+    for (var i = 0; i < flights.length; i++) {
+      var d = num(flights[i].distanceKm);
+      if (d === null) { continue; }
+      if (!best || d < best.distanceKm) { best = flights[i]; }
+    }
+    return best || flights[0] || null;
+  }
+
+  // The aircraft the dashboard should be showing: the one that was tapped while
+  // it is still in the area, otherwise the closest one.
+  function targetFlight(flights) {
+    if (detailTarget) {
+      for (var i = 0; i < flights.length; i++) {
+        if (flights[i].name === detailTarget) { return flights[i]; }
+      }
+      return null;             // it has left the area
+    }
+    return closestFlight(flights);
+  }
+
+  function initials(name) {
+    var parts = String(name || '').split(/[\s-]+/);
+    var out = '';
+    for (var i = 0; i < parts.length && out.length < 2; i++) {
+      if (/[A-Za-z]/.test(parts[i].charAt(0))) { out += parts[i].charAt(0).toUpperCase(); }
+    }
+    return out;
+  }
+
+  // A stable colour per airline, from its own code/name: same airline, same
+  // colour on every kiosk, no lookup table and nothing to fetch.
+  function airlineHue(seed) {
+    var hash = 0;
+    for (var i = 0; i < seed.length; i++) { hash = (hash * 31 + seed.charCodeAt(i)) % 360; }
+    return hash;
+  }
+
+  // Deliberately named detailNodes, NOT detailRows: the radar already has a
+  // `detailRows(flight)` for its bottom strip, and a second declaration of the
+  // same name silently wins at EVERY call site (function declarations hoist) —
+  // which called the strip's version with no aircraft to hand and killed the
+  // whole render. Any new function here must be checked against the names below.
+  function detailNodes() {
+    return {
+      airline: acdetail.querySelector('.ad-airline'),
+      badge: acdetail.querySelector('.ad-badge'),
+      airlineName: acdetail.querySelector('.ad-airline-name'),
+      flight: acdetail.querySelector('.ad-flight'),
+      schematic: acdetail.querySelector('.ad-schematic'),
+      type: acdetail.querySelector('.ad-type'),
+      model: acdetail.querySelector('.ad-model'),
+      code: acdetail.querySelector('.ad-type .ad-code'),
+      alt: acdetail.querySelector('.ad-alt'),
+      altValue: acdetail.querySelector('.ad-alt-value'),
+      route: acdetail.querySelector('.ad-route'),
+      fromCode: acdetail.querySelector('.ad-from .ad-code'),
+      fromCity: acdetail.querySelector('.ad-from .ad-city'),
+      toCode: acdetail.querySelector('.ad-to .ad-code'),
+      toCity: acdetail.querySelector('.ad-to .ad-city'),
+      empty: acdetail.querySelector('.ad-empty')
+    };
+  }
+
+  function renderDetail(flight, message) {
+    var el = detailNodes();
+    var show = !!flight;
+    el.airline.hidden = !show;
+    el.flight.hidden = !show;
+    el.schematic.hidden = !show;
+    el.type.hidden = !show;
+    el.alt.hidden = !show;
+    el.route.hidden = !show;
+    // "No aircraft" is only honest once a payload has actually arrived: before
+    // that the dashboard is simply still loading. A message (the app's own
+    // error text) is always shown — a standalone dashboard must never fail silently.
+    el.empty.textContent = message || 'NO AIRCRAFT IN THE AREA';
+    el.empty.style.letterSpacing = message ? '.02em' : '';
+    el.empty.hidden = show ? true : !(loaded || !!message);
+    if (!show) { return; }
+
+    // Airline: the code the airline paints on its tail, in a badge coloured from
+    // that code, with the name beside it.
+    var code = text(flight.airlineCode, '').toUpperCase();
+    var airlineName = text(flight.airline, '');
+    if (!code) { code = initials(airlineName); }
+    el.airline.hidden = !(code || airlineName);
+    el.badge.textContent = code || '✈';
+    el.badge.style.background = 'hsl(' + airlineHue(code || airlineName) + ',72%,66%)';
+    el.airlineName.textContent = airlineName;
+
+    el.flight.textContent = text(flight.flight || flight.name, 'Unknown');
+
+    // The schematic, plus what it is a schematic OF — an icon on its own leaves
+    // the viewer guessing which A320-family member it stands for.
+    var icon = flight.icon ? ICONS[flight.icon] : '';
+    el.schematic.innerHTML = icon || '';
+    if (!icon) {
+      // Nothing to draw (an airport vehicle, or an icon the app does not ship):
+      // fall back to the same glyph the radar plots, unrotated.
+      var glyph = planeGlyph();
+      el.schematic.innerHTML = glyph.outerHTML;
+    }
+    var model = text(flight.model, flight.type);
+    el.type.hidden = !model && !flight.code;
+    el.model.textContent = model;
+    el.code.textContent = flight.code && flight.code !== model ? flight.code : '';
+
+    if (flight.onGround) {
+      el.altValue.textContent = 'ON THE GROUND';
+    } else if (flight.altitude !== null && flight.altitude !== undefined && flight.altitude > 100) {
+      el.altValue.textContent = altitude(flight.altitude);
+    } else {
+      el.altValue.textContent = '—';
+    }
+
+    var from = text(flight.originCode, ''), to = text(flight.destinationCode, '');
+    var fromCity = text(flight.originCity, ''), toCity = text(flight.destinationCity, '');
+    el.route.hidden = !(from || to || fromCity || toCity);
+    el.fromCode.textContent = from || fromCity;
+    el.fromCity.textContent = from ? fromCity : '';
+    el.toCode.textContent = to || toCity;
+    el.toCity.textContent = to ? toCity : '';
+  }
+
+  function setView(next) {
+    view = next;
+    document.body.className = next === 'detail' ? 'detail' : '';
+  }
+
+  // Decide which view this refresh belongs in. Reached from every render(), so
+  // the dashboard appears and disappears with the traffic without a reload.
+  function updateView(flights, error) {
+    var flight = targetFlight(flights);
+    if (flag(CFG.detailAlways)) {
+      setView('detail');
+    } else if (error) {
+      // The error text lives on the radar (inside #notice), so a broken display
+      // must be on the radar view to show it — that is the whole point of not
+      // swallowing render/read failures.
+      detailTarget = '';
+      setView('radar');
+    } else if (view === 'detail') {
+      // Leave when the reason for being here is gone: the tapped aircraft has
+      // left the area, or the sky has filled up again.
+      var leaving = detailTarget ? !flight
+        : (!flag(CFG.detailAuto) || flights.length !== 1);
+      if (leaving) { detailTarget = ''; setView('radar'); }
+    } else if (flag(CFG.detailAuto) && flights.length === 1) {
+      detailTarget = '';
+      setView('detail');
+    }
+    if (view === 'detail') { renderDetail(flight, error || ''); }
+  }
+
+  function showRadar() {
+    if (flag(CFG.detailAlways)) { return; }
+    detailTarget = '';
+    setView('radar');
+    renderLast();
+  }
 
   // --------------------------------------------------------------------------- //
   // Accent colour
@@ -254,7 +535,14 @@
       '.arealabel{fill:' + accentSoft + '.62)}',
       '.home-dot{box-shadow:0 0 0 3px ' + accentSoft + '.25),0 0 18px ' + accentSoft + '.75)}',
       '.home-pulse{border-color:' + accentSoft + '.55)}',
-      '#count{text-shadow:0 0 30px ' + accentSoft + '.35)}'
+      '#count{text-shadow:0 0 30px ' + accentSoft + '.35)}',
+      // The single-aircraft dashboard follows the accent too (the airline badge
+      // keeps its own per-airline colour — that one identifies the airline).
+      '#acdetail .ad-schematic{color:' + accent + '}',
+      '#acdetail .ad-schematic{filter:drop-shadow(0 0 2.2vmin ' + accentSoft + '.35))}',
+      '#acdetail .ad-arrow{color:' + accent + '}',
+      '#acdetail .ad-flight{text-shadow:0 0 4vmin ' + accentSoft + '.35)}',
+      '#acdetail .ad-alt{text-shadow:0 0 3vmin ' + accentSoft + '.30)}'
     ].join('\n');
     var style = document.createElement('style');
     style.appendChild(document.createTextNode(css));
@@ -284,6 +572,9 @@
     detail.querySelector('.d-call').style.fontSize = scaled(4.2, pct(CFG.sizeCallsign));
     detail.querySelector('.d-route').style.fontSize = scaled(2.2, details);
     detail.querySelector('.d-rows').style.fontSize = scaled(1.7, details);
+    // The dashboard scales as one piece: every size in its CSS is a multiple of
+    // this factor, so one slider moves the lot without a layout of its own.
+    document.documentElement.style.setProperty('--ds', String(pct(CFG.sizeDetail) / 100));
   }
 
   function layout() {
@@ -629,6 +920,11 @@
   }
 
   function showNotice(big, small, isError) {
+    // The notice lives on the radar, and the dashboard covers the radar: an
+    // exception thrown mid-render (before updateView() ever runs) would otherwise
+    // be reported to a screen nobody can see. An error the user cannot read is
+    // worse than any layout glitch, so bring the radar forward for it.
+    if (isError) { setView('radar'); }
     notice.hidden = false;
     notice.className = isError ? 'error' : '';
     notice.querySelector('.big').textContent = big;
@@ -733,7 +1029,9 @@
     }
     var hideHome = nearest !== null && viewKm > 0 && nearest < viewKm * 0.25;
     document.getElementById('home').className = hideHome ? 'quiet' : '';
+    loaded = true;
     renderSelected();
+    updateView(flights, text(data.error, ''));
   }
 
   function currentPath() {
@@ -788,6 +1086,16 @@
     while (node && node !== plots && !node.getAttribute('data-index')) { node = node.parentNode; }
     if (node && node !== plots) {
       var index = parseInt(node.getAttribute('data-index'), 10);
+      // Tap-to-open-the-dashboard takes precedence over the bottom detail strip:
+      // showing the strip for one frame and then covering the screen with the
+      // dashboard is a visible flicker on the kiosk.
+      if (flag(CFG.detailClick) && !flag(CFG.detailAlways) && planes[index]) {
+        detailTarget = planes[index].flight.name;
+        selected = -1;
+        setView('detail');
+        renderDetail(planes[index].flight);
+        return;
+      }
       selected = (selected === index) ? -1 : index;
       renderSelected();
     } else {
@@ -795,6 +1103,10 @@
       renderSelected();
     }
   });
+  // Tapping the dashboard itself goes back to the radar. In auto mode the next
+  // refresh brings it straight back while there is still just one aircraft —
+  // which is the point of auto mode, and why this only says "tap to go back".
+  acdetail.addEventListener('click', function () { showRadar(); });
   window.addEventListener('resize', function () {
     layout();
     if (planes.length) { renderLast(); }
@@ -812,6 +1124,9 @@
   pulse.className = 'home-pulse' + (on(CFG.showPulse) ? '' : ' off');
   applyAccent();
   layout();
+  // A standalone dashboard starts as one — no radar frame flashes first.
+  setView(view);
+  if (view === 'detail') { renderDetail(null); }
   if (DATA) {
     try { render(DATA); } catch (error) { showNotice('Display error', String(error), true); }
   } else {
