@@ -57,6 +57,7 @@ DEFAULTS = {
     "showTrails": "true",
     "showRings": "true",
     "showSweep": "true",
+    "showPulse": "true",
     "title": "",
     "accent": "#7dd3fc",
     "refreshInterval": "20",
@@ -589,7 +590,7 @@ def clean_display(payload: dict, existing: dict = None) -> dict:
     combined["accent"] = accent if re.fullmatch(r"#[0-9a-fA-F]{6}", accent or "") else DEFAULTS["accent"]
     combined["title"] = as_text(combined.get("title"), 60)
     for key in ("hideOnGround", "showRoute", "showType", "showSpeed", "showDistance",
-                "showTrails", "showRings", "showSweep"):
+                "showTrails", "showRings", "showSweep", "showPulse"):
         combined[key] = "true" if truthy(combined.get(key)) else "false"
     values.update(combined)
     return values
@@ -714,6 +715,7 @@ Devices &amp; services → Flightradar24 → Configure. The radar range below is
 <label class="check"><input type="checkbox" name="showTrails" data-flag> Flight trails</label>
 <label class="check"><input type="checkbox" name="showRings" data-flag> Range rings</label>
 <label class="check"><input type="checkbox" name="showSweep" data-flag> Radar sweep</label>
+<label class="check"><input type="checkbox" name="showPulse" data-flag> Home-marker ripple</label>
 <h3>Where it is centred</h3>
 <label>Centre<select name="centreMode" id="centre-mode">
   <option value="home">Home — the zone.home location in Home Assistant</option>

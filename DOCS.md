@@ -82,7 +82,8 @@ The shared access token lives in `/data/access_token` — deliberately **not** i
 | Refresh every | seconds; the display polls the app, the app caches HA state for 5 s |
 | Origin → destination, Aircraft type, Speed, Distance from the centre | label content |
 | Hide aircraft on the ground | default on |
-| Flight trails, Range rings, Radar sweep | cosmetics |
+| Flight trails, Range rings, Radar sweep, Home-marker ripple | cosmetics |
+| Home-marker ripple | the slow expanding ring at the home marker. Opacity is 0 at both ends of its loop, so it never flashes at full opacity on restart; turn it off entirely if you prefer a still marker |
 | Centre | `zone.home` or custom coordinates |
 | Accent colour | drives the aircraft glyphs, trails, range rings, compass, the sweep and the home-marker glow (the nearest aircraft is drawn in a lightened version of it) |
 | Text sizes | seven sliders — overhead count, headline, info lines, aircraft callsign, aircraft detail lines, compass & area labels, credit line — each 50–300% of the design size, applied per element |

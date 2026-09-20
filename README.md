@@ -41,6 +41,10 @@ tiles, no SDK, no external requests from the kiosk.
   (count 129 px → 258 px, callsign 24.8 px → 49.7 px, compass 21 → 41, all exactly 2×), and
   the whole round trip through the admin modal (slide → save → reopen → values and readouts
   restored → display renders with them).
+* The home-marker ripple used to end its loop at opacity 0 and restart at 0.9, i.e. one frame
+  of full opacity per cycle (a visible twinkle). Opacity is now 0 at both ends and the ripple
+  is scale-based instead of width/height (no relayout per frame). Sampling a whole cycle in
+  the live page: peak 0.79, largest single-step change 0.18, and a wrap flash would be ~0.8.
 * Screenshots at 1920×1080, 1080×1920 and 3840×2160, plus the admin modal, the
   unsaved-settings preview and the aircraft detail tap.
 
