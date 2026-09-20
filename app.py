@@ -60,7 +60,17 @@ DEFAULTS = {
     "title": "",
     "accent": "#7dd3fc",
     "refreshInterval": "20",
+    # Per-element text sizes, as a percentage of the design size (100 = as designed).
+    "sizeCount": "100",
+    "sizeTitle": "100",
+    "sizeInfo": "100",
+    "sizeCallsign": "100",
+    "sizeDetails": "100",
+    "sizeFooter": "100",
+    "sizeGrid": "100",
 }
+SIZE_KEYS = ("sizeCount", "sizeTitle", "sizeInfo", "sizeCallsign", "sizeDetails",
+             "sizeFooter", "sizeGrid")
 SORT_KEYS = ("nearest", "lowest", "highest", "fastest", "callsign")
 UNIT_KEYS = ("metric", "aviation", "imperial")
 CENTRE_KEYS = ("home", "custom")
@@ -567,6 +577,13 @@ def clean_display(payload: dict, existing: dict = None) -> dict:
             number = float(DEFAULTS[key])
         number = max(low, min(high, number))
         combined[key] = str(int(number)) if key != "rangeKm" else f"{number:g}"
+    # Text sizes are percentages: 50% to 300% of the designed size.
+    for key in SIZE_KEYS:
+        try:
+            number = float(str(combined.get(key, DEFAULTS[key])))
+        except (TypeError, ValueError):
+            number = float(DEFAULTS[key])
+        combined[key] = str(int(max(50, min(300, number))))
 
     accent = as_text(combined.get("accent"), 16)
     combined["accent"] = accent if re.fullmatch(r"#[0-9a-fA-F]{6}", accent or "") else DEFAULTS["accent"]
@@ -676,7 +693,7 @@ Devices &amp; services → Flightradar24 → Configure. The radar range below is
 <h3>What to show</h3>
 <label class="slider-field">Aircraft shown<output id="max-out">6</output>
   <div class="slider-row"><input type="range" name="maxFlights" min="1" max="20" step="1" value="6"
-    oninput="document.querySelector('#max-out').textContent=this.value"></div></label>
+    data-out="max-out" oninput="syncOut(this)"></div></label>
 <label>Sort by<select name="sortBy">
   <option value="nearest">Nearest first</option><option value="lowest">Lowest first</option>
   <option value="highest">Highest first</option><option value="fastest">Fastest first</option>
@@ -704,6 +721,28 @@ Devices &amp; services → Flightradar24 → Configure. The radar range below is
 <label>Latitude<input name="latitude" placeholder="e.g. 40.7128"></label>
 <label>Longitude<input name="longitude" placeholder="e.g. -74.0060"></label>
 <label>Accent colour<input name="accent" type="color" value="#7dd3fc"></label>
+<h3>Text sizes</h3>
+<label class="slider-field">Overhead count<output id="size-count-out">100%</output>
+  <div class="slider-row"><input type="range" name="sizeCount" min="50" max="300" step="5" value="100"
+    data-out="size-count-out" oninput="syncOut(this)"></div></label>
+<label class="slider-field">Headline<output id="size-title-out">100%</output>
+  <div class="slider-row"><input type="range" name="sizeTitle" min="50" max="300" step="5" value="100"
+    data-out="size-title-out" oninput="syncOut(this)"></div></label>
+<label class="slider-field">Info lines (nearest, highest, rings)<output id="size-info-out">100%</output>
+  <div class="slider-row"><input type="range" name="sizeInfo" min="50" max="300" step="5" value="100"
+    data-out="size-info-out" oninput="syncOut(this)"></div></label>
+<label class="slider-field">Aircraft callsign<output id="size-callsign-out">100%</output>
+  <div class="slider-row"><input type="range" name="sizeCallsign" min="50" max="300" step="5" value="100"
+    data-out="size-callsign-out" oninput="syncOut(this)"></div></label>
+<label class="slider-field">Aircraft detail lines<output id="size-details-out">100%</output>
+  <div class="slider-row"><input type="range" name="sizeDetails" min="50" max="300" step="5" value="100"
+    data-out="size-details-out" oninput="syncOut(this)"></div></label>
+<label class="slider-field">Compass &amp; area labels<output id="size-grid-out">100%</output>
+  <div class="slider-row"><input type="range" name="sizeGrid" min="50" max="300" step="5" value="100"
+    data-out="size-grid-out" oninput="syncOut(this)"></div></label>
+<label class="slider-field">Credit line<output id="size-footer-out">100%</output>
+  <div class="slider-row"><input type="range" name="sizeFooter" min="50" max="300" step="5" value="100"
+    data-out="size-footer-out" oninput="syncOut(this)"></div></label>
 <div class="preview-hint" id="preview-hint"></div>
 <div class="modal-buttons">
   <button type="submit">Save display</button>
@@ -743,13 +782,18 @@ async function request(path,options){
   if(!r.ok)throw Error(data.error||'Request failed');return data}
 function field(name,value){var input=f.elements[name];if(input&&input.type!=='checkbox')input.value=value==null?'':value;
   else if(input)input.checked=String(value)!=='false'}
+// Sliders carry their readout in data-out so one helper keeps every output in step.
+function syncOut(input){var out=document.querySelector('#'+input.getAttribute('data-out'));if(!out)return;
+  out.textContent=input.value+(input.name==='maxFlights'?'':'%')}
+function syncOutputs(){var inputs=f.querySelectorAll('input[type=range]');
+  for(var i=0;i<inputs.length;i++)syncOut(inputs[i])}
 function resetForm(){
   f.reset();field('edit-id','');modalTitle.textContent='New display';hintEl.textContent='';
-  document.querySelector('#max-out').textContent=f.elements['maxFlights'].value;
   for(var i=0;i<f.elements.length;i++){var el=f.elements[i];
     if(el.getAttribute&&el.getAttribute('data-flag')!==null&&el.type==='checkbox')el.checked=true}
   field('accent','#7dd3fc');field('maxFlights','6');field('rangeKm','0');field('refreshInterval','20');
   field('sortBy','nearest');field('units','metric');field('centreMode','home');field('showType','false');
+  syncOutputs();
 }
 function syncFlags(){for(var i=0;i<f.elements.length;i++){var el=f.elements[i];
   if(el.getAttribute&&el.getAttribute('data-flag')!==null&&el.type==='checkbox')el.value=el.checked?'true':'false'}}
@@ -761,7 +805,7 @@ function openModal(display){
       if(el&&el.type==='checkbox'){el.checked=String(display[key])!=='false';el.value=el.checked?'true':'false'}
       else field(key,display[key])}
     field('edit-id',display.id);modalTitle.textContent='Edit: '+display.name}
-  document.querySelector('#max-out').textContent=f.elements['maxFlights'].value;
+  syncOutputs();
   modal.hidden=false;
 }
 function closeModal(){modal.hidden=true;resetForm()}

@@ -33,6 +33,14 @@ tiles, no SDK, no external requests from the kiosk.
 * Label placement, checked numerically in the live page (rect intersections): 0 label
   overlaps, 0 clipped labels, 0 labels over the compass or the area label, across metric,
   aviation and imperial displays and a 12-aircraft stress fixture.
+* The accent colour was a setting nothing read (choosing a colour changed nothing). It now
+  drives the glyphs, trails, rings, compass, sweep and home glow — verified by rendering the
+  same display in two colours and diffing the computed styles, e.g. trail stroke
+  `rgb(125,211,252)` → `rgb(255,176,32)`.
+* Each text-size slider was checked by doubling it and measuring the rendered font size
+  (count 129 px → 258 px, callsign 24.8 px → 49.7 px, compass 21 → 41, all exactly 2×), and
+  the whole round trip through the admin modal (slide → save → reopen → values and readouts
+  restored → display renders with them).
 * Screenshots at 1920×1080, 1080×1920 and 3840×2160, plus the admin modal, the
   unsaved-settings preview and the aircraft detail tap.
 

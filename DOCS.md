@@ -84,7 +84,13 @@ The shared access token lives in `/data/access_token` — deliberately **not** i
 | Hide aircraft on the ground | default on |
 | Flight trails, Range rings, Radar sweep | cosmetics |
 | Centre | `zone.home` or custom coordinates |
-| Accent colour | the aircraft glyph, since the compass can never be |
+| Accent colour | drives the aircraft glyphs, trails, range rings, compass, the sweep and the home-marker glow (the nearest aircraft is drawn in a lightened version of it) |
+| Text sizes | seven sliders — overhead count, headline, info lines, aircraft callsign, aircraft detail lines, compass & area labels, credit line — each 50–300% of the design size, applied per element |
+
+The screen itself keeps to: the aircraft count and info lines top-left, the scope, and a single
+credit line (`Flightradar24 via Home Assistant`) bottom-right. There is no timestamp, no
+entity name and no progress bar on the display — the scope's dashed box already shows the
+sensor's coverage and the count already shows how many are up.
 
 ## How it works
 
