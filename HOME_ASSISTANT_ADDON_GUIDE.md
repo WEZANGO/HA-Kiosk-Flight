@@ -570,6 +570,27 @@ The pattern, exactly as used by the aircraft schematics in this repo:
 **When to proxy instead:** anything unbounded or user-supplied (map tiles, arbitrary article
 images, per-request queries). Vendoring is for a closed set that fits in the repo.
 
+**The third option — fetch once, cache on disk, inline the bytes — is for a set that is closed in
+*shape* but open in *membership*.** Airline logos are exactly that: you cannot vendor them (65
+airlines today, one new charter operator tomorrow) and you do not want to proxy them per request
+(a 10 KB image that never changes). So the app fetches each one **once, in a background thread**,
+keeps it under `/data`, and serves it to the page as a `data:` URI:
+
+* **never block a page render on a fetch.** The poll returns whatever is cached and asks a worker
+  for the rest; the first sighting of an airline shows the fallback and the artwork appears on a
+  later poll. A slow or dead upstream then costs a fallback badge, never a stalled display.
+* **remember failures with two clocks**: a single miss stands that one item down for an hour, and N
+  network failures stand the whole fetcher down for ~30 minutes with one log line. Otherwise an
+  offline host spends every poll queuing timeouts.
+* **separate "not available" from "upstream is down"**: a 404 means this item has no artwork and
+  must not count towards the stand-down counter.
+* **inline as `data:`** so the same page works in the `srcdoc` preview and keeps working after the
+  upstream has gone away — the same reasoning as the vendored set above.
+* **dedupe before sending**: one `data:` URI per distinct item per payload, keyed by the code, not
+  one per row (twelve arrivals from one airline must not carry 12 copies of the same 10 KB).
+* **send only what the page can show** (the airlines in this display's own aircraft list), and make
+  it an explicit per-display on/off setting with an honest description of what it means.
+
 ---
 
 ## 7. Local testing & verification workflow

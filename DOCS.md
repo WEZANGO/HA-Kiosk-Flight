@@ -109,6 +109,7 @@ The shared access token lives in `/data/access_token` — deliberately **not** i
 | **Single-aircraft dashboard** — *This display IS the dashboard* | the display shows nothing but the dashboard, full screen (a standalone dashboard) |
 | **Single-aircraft dashboard** — *Switch to it when only one aircraft is left* | the radar hands over automatically when exactly one aircraft is in the area, and comes back when a second appears |
 | **Single-aircraft dashboard** — *Open it when an aircraft is tapped* | a tap opens the dashboard for **that** aircraft instead of the bottom detail strip; a tap on the dashboard returns to the radar. If the tapped aircraft leaves the area, the radar comes back |
+| **Airline logo** | *The airline's own logo* — the **app** fetches it once per airline (the kiosk never does), keeps it under `/data/logos` and embeds it in the page; *Monogram badge* — the airline's code on a coloured square, nothing fetched at all |
 
 All three dashboard switches are off by default, so an existing display never changes behaviour on
 upgrade. Ticked together they combine: a display that is a dashboard, whose radar returns whenever
@@ -118,9 +119,10 @@ the sky fills up again.
 
 One aircraft, the whole screen, refreshed on the same interval as the radar:
 
-* **the airline** as a coloured monogram badge built from its own two-letter code, with the airline
-  name beside it — no logo is fetched from anywhere, and the colour is derived from the code so the
-  same airline always looks the same;
+* **the airline** — its own **logo** on a light plate, with the airline name beside it, when the
+  display's *Airline logo* setting is on; otherwise the airline's two-letter code on a coloured
+  square. See "Airline logos" below for where the logo comes from and what happens when it cannot
+  be fetched (the code badge: never a broken image);
 * **the flight number** (`flight_number`, falling back to the callsign);
 * **a top-down schematic of the aircraft type** (below);
 * **the altitude**, in the display's units — or `ON THE GROUND` for a taxiing aircraft;
@@ -164,10 +166,13 @@ needs nothing but this app:
   (`web/aircraft_icons.json`) rather than linked as `<img src>` — so the same page also renders
   correctly from the admin's `srcdoc` preview, which has no base URL to fetch from.
 * the airline is a **monogram badge**, coloured from the airline's own code: a real logo would be
-  one more third-party fetch (and a trademark question) for a display that needs neither.
+  one more third-party fetch (and a trademark question) for a display that needs neither. (v0.2.1
+  added the real logo as an option — see "Airline logos": the *app* fetches it once, the kiosk
+  still fetches nothing, and the monogram stays as the fallback and the off-switch.)
 
-What the app does **not** do: it does not call Flightradar24 itself, and it cannot widen
-what the sensor reports.
+What the app does **not** do: it does not read live flight data from Flightradar24 (only the
+Supervisor API — the integration owns that session), and it cannot widen what the sensor reports.
+Its one outbound request is the airline logo artwork, and that is opt-out per display.
 
 ## What decides which aircraft appear
 
@@ -243,6 +248,43 @@ airline logos and photographs, neither of which answers "what does an A321 look 
 If your area turns up a type that is obviously mismatched, add its designator to the table in
 `app.py` and mention it — the table is meant to grow.
 
+## Airline logos
+
+The dashboard's *Airline logo* setting (on by default) shows the airline's own logo. It comes from
+Flightradar24's operator logo set, which is keyed on the airline's **ICAO** code — `EIN_logo0.png`
+exists, `EI_logo0.png` does not — so the lookup key and the two-letter badge code are different
+fields (`airline_icao` vs `airline_iata`).
+
+This is the app's only outbound request, and it is built so that it can never cost you a display:
+
+* **the kiosk never fetches anything.** The app fetches on the machine that runs it and hands the
+  page a `data:` URI, so the same page still renders in the admin's `srcdoc` preview and keeps
+  working after the network has gone away.
+* **nothing waits for the network.** A poll answers with whatever is cached and asks a background
+  thread for the rest, so a slow or dead CDN costs the **code badge for a few seconds**, never a
+  stalled display. The logo appears on a following poll.
+* **the artwork is kept forever, in `/data/logos/<ICAO>.png`.** One download per airline, ever;
+  the cache survives restarts and upgrades, and is served from disk after that.
+* **only airlines this display shows are fetched** — never the sensor's whole area (this sensor
+  reports 281 aircraft and some 65 airlines; a 6-aircraft display asks for at most 6).
+* **failures are remembered.** A miss is not retried for an hour, and after three network failures
+  (a Home Assistant with no internet) the whole fetcher stands down for half an hour and logs
+  `airline logos unreachable` — the code badge is used throughout, and nothing retries per poll.
+* **a 404 is not a failure.** Airlines without a logo file (14 of this sensor's 65) simply keep the
+  code badge; that is not counted as the internet being down.
+
+Turn it off per display with *Airline logo → Monogram badge* if you would rather this app never
+touched the internet at all; the payload then carries no logo bytes whatsoever.
+
+**Why the light plate:** the logos are the airlines' own wordmarks, and several of them (British
+Airways, American, Air France) are dark navy — on a night-sky background they would be nearly
+invisible. They sit on a soft off-white plate, which is also what the coloured code badge became, so
+the two fallbacks are visually the same object.
+
+**Trademark note:** these are the airlines' own marks, published by Flightradar24 alongside its
+data, used here for a personal non-commercial display that credits Flightradar24 in its footer. If
+you ever republish this app for others, that is the part to re-check first.
+
 ## Troubleshooting
 
 | Symptom | Cause |
@@ -258,6 +300,9 @@ If your area turns up a type that is obviously mismatched, add its designator to
 | The dashboard shows a twin-jet airliner for something odd | the type is not in the icon table and nothing in the category or model matched, so `a5` is the deliberate last resort — add the designator to `ICON_BY_CODE` in `app.py` |
 | Tapping an aircraft opens a different one's dashboard | the tap landed on a label that overlaps the glyph; the label is what is on top, so it is what opens |
 | The dashboard is on screen for the wrong aircraft | it shows the **closest** aircraft unless it was opened by a tap; a tapped aircraft is followed until it leaves the area |
+| No airline logo, just the code badge | three normal cases: the logo has not been fetched yet (it appears on a later poll), the airline has no logo file at Flightradar24 (14 of the 65 airlines this sensor sees), or the display is set to *Monogram badge*. A *Home Assistant with no internet* logs `airline logos unreachable` once and then stops trying for 30 minutes |
+| The logo is a broken image | it cannot be: the page is given a `data:` URI and falls back to the code badge when there is none. If you see a broken icon, the payload is being rewritten by something in front of the app |
+| Fetching logos is not wanted at all | set *Airline logo → Monogram badge* on each display; the app then makes no outbound request for that display (and sends no logo bytes) |
 
 ## Design rules this app follows
 

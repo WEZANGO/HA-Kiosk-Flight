@@ -8,13 +8,13 @@ tiles, no SDK, no external requests from the kiosk.
 It has two full-screen views, from one display and one settings set:
 
 * the **radar** — every aircraft in the sensor's area, plotted and labelled;
-* the **single-aircraft dashboard** — the whole screen for one aircraft: its airline badge and
-  name, flight number, a top-down **schematic of the aircraft type**, altitude and
+* the **single-aircraft dashboard** — the whole screen for one aircraft: its **airline logo**,
+  flight number, a top-down **schematic of the aircraft type**, altitude and
   origin → destination. It can *be* the display (standalone), or the radar can switch to it
   automatically when only one aircraft is left, or when an aircraft is tapped.
 
-> **Status: v0.2.0 — the dashboard was added and verified against live traffic; the v0.1.x radar
-> behaviour is unchanged.**
+> **Status: v0.2.1 — the dashboard and the airline logos were added and verified against live
+> traffic; the v0.1.x radar behaviour is unchanged.**
 
 ## Start here
 
@@ -27,6 +27,7 @@ It has two full-screen views, from one display and one settings set:
 | `web/aircraft_icons.json` | generated: the aircraft silhouettes, inlined into the page (never fetched) |
 | `vendor/adsb-radar/` | the vendored icon artwork, its licence and the attribution it requires |
 | `tools/build_aircraft_icons.py` | re-normalises the artwork into `web/aircraft_icons.json` |
+| `/data/logos/<ICAO>.png` | *(runtime, not in the repo)* airline logos fetched once by the app — it is the only thing this app ever fetches from the internet |
 
 ## Aircraft icons
 
@@ -34,11 +35,26 @@ The aircraft schematics are **not** mine and are not free-floating: they come fr
 [ADS-B Radar for macOS](https://adsb-radar.com) (37 top-down aircraft silhouettes, free for
 personal and commercial use in exchange for a backlink), the same terms are repeated in
 `vendor/adsb-radar/README.md`, `DOCS.md`, the app's admin page and the credit line of both
-views. Nothing else in this repo is third-party.
+views. Nothing else in this repo is third-party artwork — the airline logos are fetched at
+runtime, by the app, from Flightradar24's own operator set, and are the airlines' marks (see
+"Airline logos" in `DOCS.md`).
 
 ## Verified
 
-*(Everything below is measured against the running app; v0.2.0 additions are marked.)*
+*(Everything below is measured against the running app; v0.2.x additions are marked.)*
+
+* **The airline logo, in real pixels, including the reported case** (v0.2.1): a fixture pinned to
+  a live Aer Lingus aircraft shows the Aer Lingus wordmark **loaded** as an `<img>` on a light
+  plate (`naturalWidth 140`, on-screen box 140×27 inside a 164×97 badge, plate
+  `rgba(238,245,255,0.94)`), which is the check that matters — "the payload has a logo" is not the
+  same as "the logo is on the screen". A dark navy wordmark (Air France) is verified the same way:
+  that is the case the plate exists for. Then the two fallbacks: an airline whose ICAO code has **no
+  logo file** (HiSky/HYM) shows the coloured code badge, and the *Monogram badge* setting sends
+  **zero logo bytes** and shows the code — no broken images in any state.
+* **The logo pipeline's rules were each asserted** (v0.2.1): one fetch per airline cached to
+  `/data/logos/<ICAO>.png`; keys are ICAO codes (`EIN`) not IATA (`EI`, which 404s); a second poll
+  is byte-identical and re-fetches nothing; every payload key belongs to an airline actually in that
+  payload; and a 404 is not treated as "the internet is down".
 
 * **The single-aircraft dashboard, driven in a real browser against this live Home Assistant**
   (1920×1080, 1080×1920 and the admin modal; 23 assertions, all passing): the standalone
@@ -147,5 +163,14 @@ Reference implementations to read alongside this one:
   in any UI verification run, and never let an error state live on a view the current mode hides.
 * **A view that a mode hides is a view whose errors are hidden too.** `showNotice(…, isError=true)`
   now switches back to the radar first, so a client-side render failure is always readable.
+* **The middle path between "proxy it" and "vendor it": fetch once, cache on disk, inline the
+  bytes.** Airline logos are a closed-looking set whose *membership* is only known at runtime, so
+  neither a static vendor nor a per-request proxy fits. The app fetches in a **background thread**
+  (a poll answers with what is cached — a dead CDN costs a fallback badge for a few seconds, never a
+  stalled display), keeps the artwork in `/data/logos/<ICAO>.png` forever, hands the page a `data:`
+  URI (so it renders in the `srcdoc` preview too), remembers failures (one miss = an hour off; three
+  network failures = the fetcher stands down for 30 minutes and says so in the log), and treats 404
+  as "this airline has no file", not "the internet is down". It also only ever asks for airlines the
+  display is actually showing.
 * Any sensor in Home Assistant that publishes a `flights` list with positions can drive a display —
   the sensor picker is not hard-coded to Flightradar24.

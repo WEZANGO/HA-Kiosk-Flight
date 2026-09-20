@@ -143,15 +143,21 @@
   body.detail #detail,body.detail #scrim{display:none}
   #acdetail .ad-inner{display:flex;flex-direction:column;align-items:center;
     justify-content:center;gap:2.2vmin;max-width:96vw}
-  /* Airline: a coloured monogram badge built from the airline's own code, plus  */
-  /* its name. The colour is derived from the code in JS, so two airlines are    */
-  /* never the same colour and no logo has to be fetched from anywhere.          */
+  /* Airline: the real logo on a light plate (the badge the code used to fill),
+     or the coloured monogram when the logo is off, not fetched yet, or missing.
+     The plate exists because several airlines' wordmarks are dark blue/navy —
+     British Airways, American — and those vanish against a night-sky background.
+     A logo is still never fetched by this page: the URI arrives in the payload. */
   #acdetail .ad-airline{display:flex;align-items:center;gap:2vmin}
-  #acdetail .ad-badge{width:calc(9vmin * var(--ds));height:calc(9vmin * var(--ds));
-    border-radius:calc(1.6vmin * var(--ds));display:flex;align-items:center;
-    justify-content:center;font-family:ui-monospace,Menlo,Consolas,monospace;
+  #acdetail .ad-badge{min-width:calc(9vmin * var(--ds));height:calc(9vmin * var(--ds));
+    padding:0 calc(1.1vmin * var(--ds));border-radius:calc(1.6vmin * var(--ds));
+    display:flex;align-items:center;justify-content:center;box-sizing:border-box;
+    font-family:ui-monospace,Menlo,Consolas,monospace;
     font-weight:700;font-size:calc(3.6vmin * var(--ds));letter-spacing:.04em;
     color:#05080f;background:#9fd8ff;box-shadow:0 0 3vmin rgba(125,211,252,.25)}
+  #acdetail .ad-badge.has-logo{background:rgba(238,245,255,.94);min-width:0}
+  #acdetail .ad-badge img{display:block;max-height:calc(6.2vmin * var(--ds));
+    max-width:calc(26vmin * var(--ds));width:auto;height:auto}
   #acdetail .ad-airline-text{text-align:left;line-height:1.25;max-width:56vmin}
   #acdetail .ad-airline-name{font-size:calc(3vmin * var(--ds));color:#e8f1ff;
     font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -221,7 +227,8 @@
      when an aircraft is tapped (all optional — see the app's settings). -->
 <div id="acdetail">
   <div class="ad-inner">
-    <div class="ad-airline"><div class="ad-badge"></div>
+    <div class="ad-airline"><div class="ad-badge"><img class="ad-logo" alt="" hidden>
+        <span class="ad-monogram"></span></div>
       <div class="ad-airline-text"><div class="ad-airline-name"></div></div></div>
     <div class="ad-flight"></div>
     <div class="ad-schematic"></div>
@@ -334,6 +341,10 @@
   var view = flag(CFG.detailAlways) ? 'detail' : 'radar';
   var detailTarget = '';    // callsign/name of a tapped aircraft; '' = the closest
   var loaded = false;       // has a data payload arrived yet
+  // Airline logos for the aircraft in the CURRENT payload, by ICAO code, as
+  // data: URIs the app built server-side. Empty until the app has fetched them
+  // (the badge falls back to the monogram in the meantime).
+  var LOGOS = {};
 
   function closestFlight(flights) {
     var best = null;
@@ -383,6 +394,8 @@
     return {
       airline: acdetail.querySelector('.ad-airline'),
       badge: acdetail.querySelector('.ad-badge'),
+      badgeLogo: acdetail.querySelector('.ad-logo'),
+      badgeText: acdetail.querySelector('.ad-monogram'),
       airlineName: acdetail.querySelector('.ad-airline-name'),
       flight: acdetail.querySelector('.ad-flight'),
       schematic: acdetail.querySelector('.ad-schematic'),
@@ -417,14 +430,31 @@
     el.empty.hidden = show ? true : !(loaded || !!message);
     if (!show) { return; }
 
-    // Airline: the code the airline paints on its tail, in a badge coloured from
-    // that code, with the name beside it.
+    // Airline: the real logo when the payload carries one for this airline,
+    // otherwise the code badge. The logo arrives as a data: URI in the payload
+    // (see the app's logo section), so it needs no network here and no URL that
+    // would break inside the admin's srcdoc preview.
     var code = text(flight.airlineCode, '').toUpperCase();
     var airlineName = text(flight.airline, '');
     if (!code) { code = initials(airlineName); }
     el.airline.hidden = !(code || airlineName);
-    el.badge.textContent = code || '✈';
-    el.badge.style.background = 'hsl(' + airlineHue(code || airlineName) + ',72%,66%)';
+    var logo = LOGOS[text(flight.airlineIcao, '').toUpperCase()] || '';
+    if (logo) {
+      el.badgeLogo.src = logo;
+      el.badgeLogo.alt = airlineName;
+      el.badgeLogo.hidden = false;
+      el.badgeText.textContent = '';
+      el.badge.className = 'ad-badge has-logo';
+    } else {
+      // No logo yet (nothing cached, the setting is off, or the airline has no
+      // file): the coloured monogram, in the same badge, until one arrives.
+      el.badgeLogo.hidden = true;
+      el.badgeLogo.removeAttribute('src');
+      el.badgeLogo.alt = '';
+      el.badgeText.textContent = code || '✈';
+      el.badge.className = 'ad-badge';
+      el.badge.style.background = 'hsl(' + airlineHue(code || airlineName) + ',72%,66%)';
+    }
     el.airlineName.textContent = airlineName;
 
     el.flight.textContent = text(flight.flight || flight.name, 'Unknown');
@@ -964,6 +994,7 @@
 
   function render(data) {
     viewKm = num(data.viewKm) || 5;
+    LOGOS = data.logos || {};
     // The sensor's own coverage, set before the grid is drawn.
     areaBox = (data.areaBox && data.areaBox.length === 4) ? data.areaBox : [];
     areaKm = num(data.areaKm);

@@ -5,6 +5,11 @@ Data comes from a Home Assistant sensor that carries a ``flights`` attribute lis
 read through the Supervisor API. Everything is resolved inside Home Assistant, so
 a kiosk on a VLAN with no internet needs nothing but this app: no map tiles, no
 SDK, no external API, no key on the device.
+
+The single exception is the airline logo artwork on the single-aircraft dashboard:
+that one is fetched by THIS app (never by the kiosk), once per airline, cached
+under /data, and can be switched off per display ("Airline logo: monogram badge").
+See the logo section below for the rules it follows.
 """
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ import re
 import secrets
 import threading
 import time
+import base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -67,6 +73,10 @@ DEFAULTS = {
     "detailAlways": "false",
     "detailAuto": "false",
     "detailClick": "false",
+    # What the airline part of the dashboard shows: the real logo (fetched once,
+    # by the app, on the machine that runs it — never by the kiosk — and kept on
+    # disk) or the monogram badge, which needs nothing but the code.
+    "airlineLogo": "image",
     # Per-element text sizes, as a percentage of the design size (100 = as designed).
     "sizeCount": "100",
     "sizeTitle": "100",
@@ -80,6 +90,7 @@ DEFAULTS = {
 SIZE_KEYS = ("sizeCount", "sizeTitle", "sizeInfo", "sizeCallsign", "sizeDetails",
              "sizeFooter", "sizeGrid", "sizeDetail")
 DETAIL_FLAGS = ("detailAlways", "detailAuto", "detailClick")
+LOGO_KEYS = ("image", "monogram")
 SORT_KEYS = ("nearest", "lowest", "highest", "fastest", "callsign")
 UNIT_KEYS = ("metric", "aviation", "imperial")
 CENTRE_KEYS = ("home", "custom")
@@ -484,6 +495,182 @@ def aircraft_icon(code: str, model: str, category: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Airline logos
+#
+# The dashboard can show the airline's actual logo instead of a code badge. The
+# artwork comes from the same place as the data — Flightradar24's operator logo
+# set, keyed by the airline's ICAO code (`EIN`, not `EI`, which has no file) — and
+# the same three rules apply as everywhere else in this app:
+#
+#   * the KIOSK never makes the request and needs no internet: the app fetches on
+#     the machine that runs it, once per airline, and hands the page a `data:` URI
+#     (so it also renders in the admin's srcdoc preview, and keeps working after
+#     the fetch could no longer succeed);
+#   * the app never BLOCKS a display on that fetch: a poll returns whatever is
+#     cached and asks a background thread for the rest, so a slow or dead CDN
+#     costs a code badge for a few seconds, never a stalled display;
+#   * failures are remembered — a miss is not retried for an hour, and a run of
+#     network failures stands the whole thing down for half an hour — so a Home
+#     Assistant with no internet does not spend every poll on timeouts.
+#
+# Only airlines this display actually shows are ever fetched (never the sensor's
+# whole area), and the cache lives in /data next to the display store, so it
+# survives a restart and the artwork is downloaded once, ever.
+#
+# Trademark note: these are the airlines' own marks as published by Flightradar24
+# alongside its data. This is a personal, non-commercial display that credits
+# Flightradar24 in its footer; "Airline logo: monogram badge" turns it off
+# entirely, per display.
+# --------------------------------------------------------------------------- #
+LOGO_BASE_URL = "https://www.flightradar24.com/static/images/data/operators/{icao}_logo0.png"
+LOGO_USER_AGENT = "Mozilla/5.0 (compatible; KioskFlightDisplays/1.0)"
+LOGO_TIMEOUT = 10.0
+LOGO_MAX_BYTES = 400_000
+LOGO_RETRY_AFTER = 3600.0         # one failure: leave that airline alone for an hour
+LOGO_OFFLINE_AFTER = 1800.0       # no internet: stand down for half an hour
+LOGO_FAILURES_BEFORE_OFFLINE = 3
+LOGO_MAX_PARALLEL = 4
+
+_LOGO_LOCK = threading.Lock()
+_LOGO_MEMORY: dict = {}           # icao -> {"data": bytes|None, "at": float, "busy": bool}
+_LOGO_OFFLINE_UNTIL = 0.0
+_LOGO_FAILURES = 0
+_LOGO_SLOTS = threading.Semaphore(LOGO_MAX_PARALLEL)
+
+
+def _logo_path(icao: str) -> Path:
+    # Derived from DATA_FILE so the test harness's rebind of the data directory
+    # moves the cache with it (same trick as the access token).
+    return DATA_FILE.parent / "logos" / f"{icao}.png"
+
+
+def _read_logo_file(icao: str):
+    try:
+        data = _logo_path(icao).read_bytes()
+    except OSError:
+        return None
+    return data if data[:8] == b"\x89PNG\r\n\x1a\n" else None
+
+
+def logo_enabled(config: dict) -> bool:
+    return str(config.get("airlineLogo", DEFAULTS["airlineLogo"])) != "monogram"
+
+
+def logo_data(icao: str):
+    """Cached logo bytes for an airline, starting a background fetch if missing.
+
+    Returns None the first time an airline is seen: the caller renders the code
+    badge, and the logo appears on a later poll. That is deliberate — nothing
+    here ever waits for the network.
+    """
+    icao = (icao or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{2,4}", icao):
+        return None
+    now = time.time()
+    with _LOGO_LOCK:
+        state = _LOGO_MEMORY.get(icao)
+        if state:
+            if state["data"]:
+                return state["data"]
+            if state["busy"] or now - state["at"] < LOGO_RETRY_AFTER:
+                return None                       # already being fetched, or a fresh miss
+        if _LOGO_OFFLINE_UNTIL > now:
+            return None                           # we know the network is down: don't queue
+    data = _read_logo_file(icao)
+    if data:
+        with _LOGO_LOCK:
+            _LOGO_MEMORY[icao] = {"data": data, "at": time.time(), "busy": False}
+        return data
+    _start_logo_fetch(icao)
+    return None
+
+
+def _start_logo_fetch(icao: str) -> None:
+    with _LOGO_LOCK:
+        state = _LOGO_MEMORY.setdefault(icao, {"data": None, "at": 0.0, "busy": False})
+        if state["busy"]:
+            return
+        state["busy"] = True
+    threading.Thread(target=_fetch_logo, args=(icao,), daemon=True).start()
+
+
+def _fetch_logo(icao: str) -> None:
+    """Background worker: fetch one logo, keep it on disk, remember how it went."""
+    global _LOGO_OFFLINE_UNTIL, _LOGO_FAILURES
+    data = None
+    network_error = False
+    with _LOGO_SLOTS:
+        try:
+            request = Request(LOGO_BASE_URL.format(icao=icao),
+                              headers={"User-Agent": LOGO_USER_AGENT})
+            with urlopen(request, timeout=LOGO_TIMEOUT) as response:
+                if int(getattr(response, "status", 0) or 0) == 200:
+                    data = response.read(LOGO_MAX_BYTES + 1)
+        except HTTPError as error:
+            # A 4xx is "this airline has no logo file", not "the internet is down":
+            # it must not count towards standing the fetcher down.
+            network_error = error.code >= 500
+        except (URLError, OSError, ValueError):
+            network_error = True
+    if data is not None and (len(data) > LOGO_MAX_BYTES or data[:8] != b"\x89PNG\r\n\x1a\n"):
+        data = None                    # an error page or a truncated download
+        network_error = True
+    now = time.time()
+    with _LOGO_LOCK:
+        _LOGO_MEMORY[icao] = {"data": data, "at": now, "busy": False}
+        if data:
+            _LOGO_FAILURES = 0
+        elif network_error:
+            _LOGO_FAILURES += 1
+            # Say it, and stand the fetcher down — ONCE. Reaching the threshold
+            # again (a couple of airlines can fail in the same second) must not
+            # print a second line, or the log grows a line per airline.
+            if _LOGO_FAILURES >= LOGO_FAILURES_BEFORE_OFFLINE and _LOGO_OFFLINE_UNTIL <= now:
+                _LOGO_OFFLINE_UNTIL = now + LOGO_OFFLINE_AFTER
+                print(f"kiosk-flight: airline logos unreachable; not retrying for "
+                      f"{int(LOGO_OFFLINE_AFTER / 60)} minutes (the monogram badge is shown)", flush=True)
+    if not data:
+        return
+    try:
+        directory = _logo_path(icao).parent
+        directory.mkdir(parents=True, exist_ok=True)
+        temporary = directory / f"{icao}.tmp"
+        temporary.write_bytes(data)
+        temporary.replace(_logo_path(icao))
+    except OSError:
+        pass                           # a read-only /data costs a re-fetch, never a failure
+
+
+def logo_data_uri(icao: str) -> str:
+    data = logo_data(icao)
+    if not data:
+        return ""
+    return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+
+def airline_logos(flights: list, config: dict) -> dict:
+    """Data URIs for the airlines a payload shows, keyed by ICAO code.
+
+    Deduplicated and sent once per airline rather than once per aircraft: a
+    dozen arrivals from one airline should not carry the same 8 KB of PNG twelve
+    times over the LAN.
+    """
+    if not logo_enabled(config):
+        return {}
+    logos = {}
+    seen = set()
+    for row in flights:
+        icao = row.get("airlineIcao") or ""
+        if not icao or icao in seen:
+            continue
+        seen.add(icao)
+        uri = logo_data_uri(icao)
+        if uri:
+            logos[icao] = uri
+    return logos
+
+
+# --------------------------------------------------------------------------- #
 # Flight payload
 # --------------------------------------------------------------------------- #
 def flight_rows(config: dict) -> dict:
@@ -508,6 +695,7 @@ def flight_rows(config: dict) -> dict:
         "rings": [],
         "total": 0,
         "flights": [],
+        "logos": {},
         "error": "",
         "warning": "",
         "centre": None,
@@ -586,6 +774,10 @@ def flight_rows(config: dict) -> dict:
             # the tail), else ICAO. It is a code, not a name, so it is kept apart
             # from `airline`.
             "airlineCode": as_text(flight.get("airline_iata") or flight.get("airline_icao"), 4),
+            # The logo is keyed on ICAO, not IATA: Flightradar24's operator set has
+            # EIN_logo0.png but no EI_logo0.png, so the badge's two-letter code and
+            # the logo's lookup key are different fields on purpose.
+            "airlineIcao": as_text(flight.get("airline_icao"), 4),
             "type": as_text(flight.get("aircraft_model") or flight.get("aircraft_code"), 40),
             "code": as_text(flight.get("aircraft_code"), 12),
             "model": as_text(flight.get("aircraft_model"), 40),
@@ -646,6 +838,9 @@ def flight_rows(config: dict) -> dict:
     # my display empty when Flightradar shows aircraft?".
     payload["areaCount"] = sum(1 for flight in flights if isinstance(flight, dict))
     payload["flights"] = rows[:limit]
+    # The airline logos for exactly these aircraft, as data: URIs (see the logo
+    # section above for why the page never fetches them itself).
+    payload["logos"] = airline_logos(payload["flights"], config)
     if total > limit:
         payload["warning"] = f"Showing {limit} of {total} aircraft overhead."
 
@@ -717,6 +912,8 @@ def clean_display(payload: dict, existing: dict = None) -> dict:
         combined["sortBy"] = "nearest"
     if combined["units"] not in UNIT_KEYS:
         combined["units"] = "metric"
+    if combined["airlineLogo"] not in LOGO_KEYS:
+        combined["airlineLogo"] = DEFAULTS["airlineLogo"]
 
     latitude = as_float(combined.get("latitude"))
     longitude = as_float(combined.get("longitude"))
@@ -906,6 +1103,13 @@ aircraft, and it refreshes with the radar.</p>
 <label class="check"><input type="checkbox" name="detailAuto" data-flag> Switch to it when only one aircraft is left</label>
 <label class="check"><input type="checkbox" name="detailClick" data-flag> Open it when an aircraft is tapped
   (tap again to go back)</label>
+<label>Airline logo<select name="airlineLogo">
+  <option value="image">The airline's own logo</option>
+  <option value="monogram">Monogram badge — its code, nothing fetched</option></select>
+  <span class="hint">The logo is the one thing here that comes from the internet: the
+  <em>app</em> fetches it once per airline and keeps it under <code>/data</code>, so it still shows on a
+  kiosk with no internet. Until it has arrived — and on a Home Assistant with no internet at all — the
+  badge falls back to the airline's code.</span></label>
 <p class="hint wide">Left unticked, the display is the radar exactly as before. The three are
 independent: a standalone dashboard can also be one whose radar comes back when the sky fills up.</p>
 <h3>Where it is centred</h3>
@@ -991,6 +1195,7 @@ function resetForm(){
   field('accent','#7dd3fc');field('maxFlights','6');field('rangeKm','0');field('refreshInterval','20');
   field('sortBy','nearest');field('units','metric');field('centreMode','home');field('showType','false');
   field('detailAlways','false');field('detailAuto','false');field('detailClick','false');
+  field('airlineLogo','image');
   syncOutputs();
 }
 function syncFlags(){for(var i=0;i<f.elements.length;i++){var el=f.elements[i];
