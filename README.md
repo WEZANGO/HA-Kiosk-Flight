@@ -9,13 +9,14 @@ It has two full-screen views, from one display and one settings set:
 
 * the **radar** — every aircraft in the sensor's area, plotted and labelled;
 * the **single-aircraft dashboard** — the whole screen for one aircraft: its **airline logo**,
-  flight number, a **schematic of the aircraft type** (top-down, or a **side-view profile** —
-  the display's choice), altitude and
+  flight number, a **schematic of the aircraft type** (top-down, a **side-view profile**, or a
+  **real picture of that airline on that type** — the display's choice), altitude and
   origin → destination. It can *be* the display (standalone), or the radar can switch to it
   automatically when only one aircraft is left, or when an aircraft is tapped.
 
-> **Status: v0.3.0 — the dashboard, the airline logos and the side-view profiles were added and
-> verified against live traffic; the v0.1.x radar behaviour is unchanged.**
+> **Status: v0.4.0 — the dashboard, airline logos, side-view profiles and real per-airline
+> aircraft pictures were added and verified against live traffic; the v0.1.x radar behaviour is
+> unchanged.**
 
 ## Start here
 
@@ -49,7 +50,27 @@ The aircraft schematics are **not** mine and are not free-floating:
 
 ## Verified
 
-*(Everything below is measured against the running app; v0.2.x/v0.3.x additions are marked.)*
+*(Everything below is measured against the running app; v0.2.x–v0.4.x additions are marked.)*
+
+* **Real aircraft pictures, end to end (v0.4.0)**: the personal evaluation library was built by
+  crawling the shop's public catalogue for the aircraft overhead *at that moment* — 530 products
+  scanned, 7 airline+type combinations matched and written as `<ICAO>_<TYPE>.jpg`. The dashboard
+  then rendered a **Ryanair 737-8AS** illustration (800×480 source, loaded `<img>`, framed on a
+  photo card) for a live Ryanair 737-8AS, and the **fallback was asserted on real data**: an
+  aircraft the library has nothing for (a Diamond DA42) shows the drawn silhouette instead.
+  Silhouette mode sends **no picture bytes at all**; an empty library produces no images, no
+  exception and a full list of aircraft.
+* **The matcher was tightened after it was wrong, not before**: the first pass put an *A321neo*
+  illustration on an *A320* and a *777-200* on a *777-300*, because any product by the right
+  airline scored. It now requires the airline **and** the type family, plus the Boeing variant digit
+  (`-300` is not `-200`), reports near-misses it rejected ("no exact illustration for Aer Lingus
+  Airbus A320-214"), and has a `--loose` mode for "roughly what would this look like".
+* **The repo stays publishable, and that is asserted**: no `.jpg`/`.jpeg`/`.webp` is tracked by git,
+  the image library resolves outside the repository, and the crawler lives in `~/workspace`, not in
+  the repo — the evaluation images are the shop's, and the licence is the user's to buy.
+* **The airline-cache refactor did not regress the logos**: logos and pictures now share one
+  `AssetCache`, and the offline suite (polls never blocking, one stand-down line, a 404 not counting
+  as "internet down", no fetches queued while stood down) passes unchanged on the new code.
 
 * **The side-view profiles (v0.3.0)**: every one of 13 real type codes lands on the intended profile
   (`A320`/`B738` → twin-jet, `B77W`/`B789` → widebody, `B748`/`A388` → four-engine, `E195` →
@@ -208,5 +229,14 @@ Reference implementations to read alongside this one:
   the tall one. Fix: size the box, let the SVG fill it and letterbox its own art
   (`preserveAspectRatio` already does this) — then test the tallest member, by injecting it, instead
   of waiting for one to fly over.
+* **Bring-your-own-artwork is a boundary, not a feature flag.** The "Aircraft image" setting reads
+  a *user's* library (`/data/liveries`) or a *user's* API key; the repo ships no raster artwork and
+  a test asserts that (git tracks no `.jpg`, the library resolves outside the repo). That is what
+  makes it shippable while the artwork behind it is licensed, personal, and swappable — the code
+  never has to know whose pictures they are.
+* **A generous matcher is worse than none.** Matching "any product by the right airline" put an
+  A321neo on an A320: airline name alone is not a match. The scoring now refuses on family and
+  variant mismatch and *says what it rejected*, which is the difference between a preview you can
+  trust and one that quietly lies.
 * Any sensor in Home Assistant that publishes a `flights` list with positions can drive a display —
   the sensor picker is not hard-coded to Flightradar24.

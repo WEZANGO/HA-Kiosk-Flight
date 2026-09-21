@@ -195,6 +195,14 @@
     color:#a8cde8;margin-top:.6vmin}
   #acdetail .ad-arrow{font-size:calc(4.6vmin * var(--ds));color:#7dd3fc}
   #acdetail .ad-empty{font-size:calc(3vmin * var(--ds));letter-spacing:.28em;color:#dcecf8}
+  /* A real airline/type picture (the app's "Aircraft image" setting): it carries
+     its own background, so it is framed like a photo rather than drawn like the
+     silhouettes — rounded, shadowed, and never stretched. */
+  #acdetail .ad-schematic.photo{width:calc(64vmin * var(--ds));height:auto}
+  #acdetail .ad-schematic.photo img{max-width:100%;max-height:calc(34vmin * var(--ds));
+    width:auto;height:auto;display:block;border-radius:calc(1.4vmin * var(--ds));
+    box-shadow:0 0 calc(3.4vmin * var(--ds)) rgba(0,0,0,.55);
+    filter:drop-shadow(0 0 2vmin rgba(125,211,252,.18))}
   /* Several of these boxes are flex containers, and an author `display:flex`
      beats the user-agent `[hidden]{display:none}` — so hiding one would do
      nothing. Say it explicitly. */
@@ -343,6 +351,9 @@
   // data: URIs the app built server-side. Empty until the app has fetched them
   // (the badge falls back to the monogram in the meantime).
   var LOGOS = {};
+  // Real airline/type pictures from the current payload, keyed `<ICAO>_<TYPE>`
+  // (also data: URIs built by the app — the page fetches nothing).
+  var IMAGES = {};
 
   function closestFlight(flights) {
     var best = null;
@@ -464,16 +475,28 @@
     // The schematic, plus what it is a schematic OF — an icon on its own leaves
     // the viewer guessing which A320-family member it stands for.
     var icon = flight.icon ? ICONS[flight.icon] : '';
-    // The profile set is wide and short, the plan views are square: the box has
-    // to know which it is holding (a profile in the square box floats in empty
-    // space, and a plan view in the wide box gets stretched thin).
-    el.schematic.className = 'ad-schematic' + (icon && flight.icon.indexOf('side-') === 0 ? ' side' : '');
-    el.schematic.innerHTML = icon || '';
-    if (!icon) {
-      // Nothing to draw (an airport vehicle, or an icon the app does not ship):
-      // fall back to the same glyph the radar plots, unrotated.
-      var glyph = planeGlyph();
-      el.schematic.innerHTML = glyph.outerHTML;
+    // A real picture of this airline on this type, if the app found one (it
+    // arrives in the payload as a data URI, so it needs no network here). The
+    // silhouettes remain the fallback, and the box changes shape to suit
+    // whichever it is holding.
+    var picture = IMAGES[(text(flight.airlineIcao, '').toUpperCase() + '_'
+                          + text(flight.code, '').toUpperCase())] || '';
+    if (picture) {
+      el.schematic.className = 'ad-schematic photo';
+      el.schematic.innerHTML = '';
+      var img = document.createElement('img');
+      img.src = picture;
+      img.alt = [airlineName, text(flight.model, flight.type)].filter(Boolean).join(' ');
+      el.schematic.appendChild(img);
+    } else {
+      el.schematic.className = 'ad-schematic' + (icon && flight.icon.indexOf('side-') === 0 ? ' side' : '');
+      el.schematic.innerHTML = icon || '';
+      if (!icon) {
+        // Nothing to draw (an airport vehicle, or an icon the app does not ship):
+        // fall back to the same glyph the radar plots, unrotated.
+        var glyph = planeGlyph();
+        el.schematic.innerHTML = glyph.outerHTML;
+      }
     }
     var model = text(flight.model, flight.type);
     el.type.hidden = !model && !flight.code;
@@ -1001,6 +1024,7 @@
   function render(data) {
     viewKm = num(data.viewKm) || 5;
     LOGOS = data.logos || {};
+    IMAGES = data.images || {};
     // The sensor's own coverage, set before the grid is drawn.
     areaBox = (data.areaBox && data.areaBox.length === 4) ? data.areaBox : [];
     areaKm = num(data.areaKm);

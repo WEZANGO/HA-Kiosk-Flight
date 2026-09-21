@@ -86,6 +86,9 @@ The shared access token lives in `/data/access_token` — deliberately **not** i
 |---|---|
 | `flight_entity` | default sensor for new displays (default `sensor.flightradar24_current_in_area`) |
 | `home_latitude` / `home_longitude` | optional fixed centre; `0` means "use `zone.home`" |
+| `image_library` | folder the *Aircraft image* setting reads pictures from (default `/data/liveries`) |
+| `image_api_url` | optional URL template for a picture API — `{icao}`, `{type}` and `{key}` are substituted. Empty = library only |
+| `image_api_key` | the key for that API (stored as a password field in Home Assistant; never in this repository) |
 
 **Per display** (stored in `/data/flight_displays.json`):
 
@@ -111,6 +114,7 @@ The shared access token lives in `/data/access_token` — deliberately **not** i
 | **Single-aircraft dashboard** — *Open it when an aircraft is tapped* | a tap opens the dashboard for **that** aircraft instead of the bottom detail strip; a tap on the dashboard returns to the radar. If the tapped aircraft leaves the area, the radar comes back |
 | **Airline logo** | *The airline's own logo* — the **app** fetches it once per airline (the kiosk never does), keeps it under `/data/logos` and embeds it in the page; *Monogram badge* — the airline's code on a coloured square, nothing fetched at all |
 | **Aircraft type graphic** | *Top-down* — the familiar plan view (37 silhouettes, per family); *Side view* — a profile of the type (9 profiles, per class: twin-jet, widebody, four-engine, regional, business jet, turboprop, light, helicopter, glider). Both sets are local; see "Aircraft icons and the type schematic" |
+| **Aircraft image** | *Drawn silhouette* (default) — nothing fetched, ever; *Real picture* — a picture of **this airline on this aircraft type**, looked up in the image library and/or a keyed API configured in the app options, with the silhouette as the fallback. See "Aircraft pictures" |
 
 All three dashboard switches are off by default, so an existing display never changes behaviour on
 upgrade. Ticked together they combine: a display that is a dashboard, whose radar returns whenever
@@ -282,6 +286,47 @@ authored in this repository in the same flat style. Full provenance per file:
 If your area turns up a type that is obviously mismatched, add its designator to the table in
 `app.py` and mention it — the table is meant to grow.
 
+## Aircraft pictures (per airline, per aircraft type)
+
+*Aircraft image → Real picture* replaces the drawn silhouette with a picture of **this airline on
+this aircraft type** — a Ryanair 737-800 livery for a Ryanair 737-800. It is looked up by
+`<ICAO>_<TYPE>` (e.g. `EIN_A21N`: Aer Lingus, A321neo).
+
+Two sources, tried in this order:
+
+1. **A keyed API**, if `image_api_url` is set in the app options — a URL template with `{icao}`,
+   `{type}` and `{key}` substituted (`image_api_key` supplies `{key}`). This is the shape most
+   aviation-asset APIs use; the headers sent are `x-api-key` and `Authorization: Bearer`, because
+   providers differ and neither choice should be the user's problem.
+2. **A local image library** — `image_library` (default `/data/liveries`), read as
+   `<ICAO>_<TYPE>.jpg` (or `.png`, `.webp`, `.svg`), or with any filename at all if an `index.json`
+   in that folder maps keys to files: `{"EIN_A21N": "aer-lingus-a321.jpg"}`.
+
+Whatever is found is cached under `/data` and embedded in the page as a `data:` URI, so the kiosk
+still fetches nothing and the admin preview still works. With no picture — not configured, nothing
+found, or a failed download — the drawn silhouette is shown, so a display never comes up empty.
+
+**Nothing of this is in the repository.** The library is the user's own material (licensed artwork
+they bought, or their own exports), the API key is Home Assistant configuration, and the repo
+contains no raster artwork at all — a check in the test suite asserts that, and that the library
+path is outside the repo, so this stays true by accident-proof.
+
+The same fetch rules as the airline logos apply, because they share one implementation: never block
+a poll on the network, remember failures (one miss for an hour; three network errors stands the
+fetcher down for half an hour with one log line), and treat a 4xx as "no picture for this aircraft"
+rather than "the internet is down".
+
+**Where to get pictures** (researched, for the record):
+
+| Source | What it is | Verdict |
+|---|---|---|
+| Aviation asset APIs (e.g. logostream) | keyed API, airline logos on a free tier, **aircraft liveries on a paid tier**; `x-api-key`, dark-mode variants, CDN | **works with the `image_api_url` template** — this is what the feature is shaped for |
+| Stock illustration shops (e.g. NorebboStock) | per-airline/per-type illustrations, ~$12 each, in Shopify; the public catalogue exposes ~530 products with unwatermarked preview images | buy a licence, then point `image_library` at the purchased files; the previews are for evaluating the look, not for use |
+| FSLTL / AIG (flight-sim traffic packs) | 2,375 liveries matched per airline+type — the right taxonomy, the wrong format: 3D glTF models + 4,032 DDS textures, **71 raster images in the whole 10 GB repo, no open licence at all** | **not usable**: sim-use-only freeware with no licence file, and nothing to harvest as an image |
+
+The airline logos and the aircraft pictures are the airlines' and photographers'/artists' own marks
+and work. This app is for a personal, non-commercial display.
+
 ## Airline logos
 
 The dashboard's *Airline logo* setting (on by default) shows the airline's own logo. It comes from
@@ -341,6 +386,9 @@ footer). If you ever republish this app for others, that is the part to re-check
 | No airline logo, just the code badge | three normal cases: the logo has not been fetched yet (it appears on a later poll), the airline has no logo file at Flightradar24 (14 of the 65 airlines this sensor sees), or the display is set to *Monogram badge*. A *Home Assistant with no internet* logs `airline logos unreachable` once and then stops trying for 30 minutes |
 | The logo is a broken image | it cannot be: the page is given a `data:` URI and falls back to the code badge when there is none. If you see a broken icon, the payload is being rewritten by something in front of the app |
 | Fetching logos is not wanted at all | set *Airline logo → Monogram badge* on each display; the app then makes no outbound request for that display (and sends no logo bytes) |
+| No aircraft picture, just the silhouette | normal: nothing configured (`image_api_url` empty and the library empty), nothing found for this airline+type, or the fetch failed. With *Real picture* set, the app asks for `<ICAO>_<TYPE>` — check the library has that exact name, or that the `index.json` maps it |
+| Pictures are the wrong airline or type | whatever is in the library wins over what is "right": the app matches on the file name (`EIN_A21N`) and does not inspect the image. Remove or rename the file to fix it |
+| A picture API returns nothing | check `image_api_url`'s placeholders (`{icao}`, `{type}`, `{key}`), that the key is set, and the log line `aircraft images unreachable` — after three network errors the fetcher stands down for half an hour by design |
 
 ## Design rules this app follows
 

@@ -42,6 +42,12 @@ OPTION_DEFAULTS = {
     "flight_entity": "sensor.flightradar24_current_in_area",
     "home_latitude": 0.0,
     "home_longitude": 0.0,
+    # Aircraft-picture sources for the dashboard's "Aircraft image" setting. Both
+    # are the user's own configuration, held in Home Assistant's options file —
+    # never in the repository. Empty api_url = library only.
+    "image_library": "/data/liveries",
+    "image_api_url": "",          # e.g. https://…/livery?icao={icao}&type={type}&key={key}
+    "image_api_key": "",
 }
 
 # Every display setting. Booleans travel FormData -> JSON -> injected JS as the
@@ -80,6 +86,11 @@ DEFAULTS = {
     # How the aircraft type is drawn: "top" (the familiar plan view) or "side"
     # (a profile). Both sets are vendored and inlined; see the icon section.
     "typeGraphic": "top",
+    # Where the type graphic comes from: the vendored silhouettes ("silhouette"),
+    # or a real picture of the airline's livery on that type ("image"), looked up
+    # in the image library and/or a keyed API configured in the app options, with
+    # the silhouette as the fallback.
+    "typeImage": "silhouette",
     # Per-element text sizes, as a percentage of the design size (100 = as designed).
     "sizeCount": "100",
     "sizeTitle": "100",
@@ -95,6 +106,7 @@ SIZE_KEYS = ("sizeCount", "sizeTitle", "sizeInfo", "sizeCallsign", "sizeDetails"
 DETAIL_FLAGS = ("detailAlways", "detailAuto", "detailClick")
 LOGO_KEYS = ("image", "monogram")
 TYPE_GRAPHIC_KEYS = ("top", "side")
+TYPE_IMAGE_KEYS = ("silhouette", "image")
 SORT_KEYS = ("nearest", "lowest", "highest", "fastest", "callsign")
 UNIT_KEYS = ("metric", "aviation", "imperial")
 CENTRE_KEYS = ("home", "custom")
@@ -568,25 +580,199 @@ LOGO_OFFLINE_AFTER = 1800.0       # no internet: stand down for half an hour
 LOGO_FAILURES_BEFORE_OFFLINE = 3
 LOGO_MAX_PARALLEL = 4
 
-_LOGO_LOCK = threading.Lock()
-_LOGO_MEMORY: dict = {}           # icao -> {"data": bytes|None, "at": float, "busy": bool}
-_LOGO_OFFLINE_UNTIL = 0.0
-_LOGO_FAILURES = 0
-_LOGO_SLOTS = threading.Semaphore(LOGO_MAX_PARALLEL)
+# --------------------------------------------------------------------------- #
+# One fetcher, two kinds of artwork
+#
+# Airline logos and aircraft images obey exactly the same rules, so they share
+# one cache implementation. The rules, each of which cost a bug to learn:
+#
+#   * get() NEVER waits for the network. It returns what is on disk or in memory
+#     and asks a worker thread for anything missing, so a slow or dead upstream
+#     costs a fallback (a code badge, a silhouette) for a few seconds and never a
+#     stalled display;
+#   * a miss is remembered for `retry_after`, and after `failures_before_offline`
+#     network errors the whole cache stands down for `offline_after` with ONE log
+#     line — a Home Assistant with no internet must not spend every poll on
+#     timeouts;
+#   * a 4xx is "this key has no artwork", NOT "the internet is down";
+#   * what comes back is validated (`accepts`), so an error page or a truncated
+#     download is never cached as art;
+#   * the cache lives under /data, survives restarts, and is never in the repo.
+# --------------------------------------------------------------------------- #
+def guess_mime(data: bytes) -> str:
+    """The MIME type of some artwork, from its magic bytes ("" = not artwork)."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:5] in (b"<?xml", b"<svg ") or data[:4] == b"<svg":
+        return "image/svg+xml"
+    return ""
 
 
-def _logo_path(icao: str) -> Path:
-    # Derived from DATA_FILE so the test harness's rebind of the data directory
-    # moves the cache with it (same trick as the access token).
-    return DATA_FILE.parent / "logos" / f"{icao}.png"
+EXT_BY_MIME = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp",
+               "image/svg+xml": ".svg"}
 
 
-def _read_logo_file(icao: str):
-    try:
-        data = _logo_path(icao).read_bytes()
-    except OSError:
+class AssetCache:
+    """One fetched asset per key: memory -> disk -> background fetch."""
+
+    def __init__(self, name, directory, url_for, headers, accepts, *,
+                 timeout=10.0, max_bytes=400_000, retry_after=3600.0,
+                 offline_after=1800.0, failures_before_offline=3, max_parallel=4,
+                 key_pattern=r"[A-Z0-9](?:[A-Z0-9_]{0,14})", hint=""):
+        self.name = name
+        self.directory = directory          # callable: settings can change while running
+        self.url_for = url_for              # callable(key) -> url, or "" for library-only
+        self.headers = headers              # callable() -> dict
+        self.accepts = accepts
+        self.timeout = timeout
+        self.max_bytes = max_bytes
+        self.retry_after = retry_after
+        self.offline_after = offline_after
+        self.failures_before_offline = failures_before_offline
+        self.key_pattern = key_pattern
+        self.hint = hint
+        self.lock = threading.Lock()
+        self.memory: dict = {}
+        self.offline_until = 0.0
+        self.failures = 0
+        self.slots = threading.Semaphore(max_parallel)
+        self._index_at = 0.0
+        self._index: dict = {}
+
+    # -- reading ----------------------------------------------------------- #
+    def _index_names(self) -> dict:
+        """Optional `index.json` in the directory: {"EIN_A21N": "some file.jpg"}.
+
+        It exists so a library can be populated with arbitrary filenames (a
+        personal collection, or a export from a stock purchase) without renaming
+        everything to the app's convention.
+        """
+        now = time.time()
+        if now - self._index_at < 5.0:
+            return self._index
+        self._index_at = now
+        try:
+            value = json.loads((self.directory() / "index.json").read_text())
+            self._index = value if isinstance(value, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            self._index = {}
+        return self._index
+
+    def _read(self, key: str):
+        directory = self.directory()
+        for extension in (".png", ".jpg", ".jpeg", ".webp", ".svg"):
+            try:
+                data = (directory / f"{key}{extension}").read_bytes()
+            except OSError:
+                continue
+            if data and self.accepts(data):
+                return data
+        name = self._index_names().get(key)
+        if name:
+            try:
+                data = (directory / str(name)).read_bytes()
+            except OSError:
+                return None
+            if data and self.accepts(data):
+                return data
         return None
-    return data if data[:8] == b"\x89PNG\r\n\x1a\n" else None
+
+    def get(self, key: str):
+        key = (key or "").strip().upper()
+        if not re.fullmatch(self.key_pattern, key):
+            return None
+        now = time.time()
+        with self.lock:
+            state = self.memory.get(key)
+            if state:
+                if state["data"]:
+                    return state["data"]
+                if state["busy"] or now - state["at"] < self.retry_after:
+                    return None
+            if self.offline_until > now:
+                return None
+        data = self._read(key)
+        if data:
+            with self.lock:
+                self.memory[key] = {"data": data, "at": time.time(), "busy": False}
+            return data
+        if self.url_for(key):
+            self._start(key)
+        return None
+
+    # -- fetching ---------------------------------------------------------- #
+    def _start(self, key: str) -> None:
+        with self.lock:
+            state = self.memory.setdefault(key, {"data": None, "at": 0.0, "busy": False})
+            if state["busy"]:
+                return
+            state["busy"] = True
+        threading.Thread(target=self._run, args=(key,), daemon=True).start()
+
+    def _run(self, key: str) -> None:
+        url = self.url_for(key)
+        data = None
+        network_error = False
+        with self.slots:
+            if url:
+                try:
+                    request = Request(url, headers=self.headers())
+                    with urlopen(request, timeout=self.timeout) as response:
+                        if int(getattr(response, "status", 0) or 0) == 200:
+                            data = response.read(self.max_bytes + 1)
+                except HTTPError as error:
+                    network_error = error.code >= 500
+                except (URLError, OSError, ValueError):
+                    network_error = True
+        if data is not None and (len(data) > self.max_bytes or not self.accepts(data)):
+            data = None
+            network_error = True
+        now = time.time()
+        with self.lock:
+            self.memory[key] = {"data": data, "at": now, "busy": False}
+            if data:
+                self.failures = 0
+            elif network_error:
+                self.failures += 1
+                if self.failures >= self.failures_before_offline and self.offline_until <= now:
+                    self.offline_until = now + self.offline_after
+                    print(f"kiosk-flight: {self.name} unreachable; not retrying for "
+                          f"{int(self.offline_after / 60)} minutes{self.hint}", flush=True)
+        if not data:
+            return
+        try:
+            directory = self.directory()
+            directory.mkdir(parents=True, exist_ok=True)
+            temporary = directory / f"{key}.tmp"
+            temporary.write_bytes(data)
+            temporary.replace(directory / f"{key}{EXT_BY_MIME.get(guess_mime(data), '.bin')}")
+        except OSError:
+            pass                       # a read-only /data costs a re-fetch, never a failure
+
+
+def is_png(data: bytes) -> bool:
+    return data[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def is_artwork(data: bytes) -> bool:
+    return bool(guess_mime(data))
+
+
+# Airline logos: Flightradar24's operator set, keyed on the ICAO code.
+LOGO_CACHE = AssetCache(
+    "airline logos",
+    directory=lambda: DATA_FILE.parent / "logos",
+    url_for=lambda key: LOGO_BASE_URL.format(icao=key),
+    headers=lambda: {"User-Agent": LOGO_USER_AGENT},
+    accepts=is_png, timeout=LOGO_TIMEOUT, max_bytes=LOGO_MAX_BYTES,
+    retry_after=LOGO_RETRY_AFTER, offline_after=LOGO_OFFLINE_AFTER,
+    failures_before_offline=LOGO_FAILURES_BEFORE_OFFLINE,
+    max_parallel=LOGO_MAX_PARALLEL, key_pattern=r"[A-Z0-9]{2,4}",
+    hint=" (the monogram badge is shown)")
 
 
 def logo_enabled(config: dict) -> bool:
@@ -597,85 +783,10 @@ def logo_data(icao: str):
     """Cached logo bytes for an airline, starting a background fetch if missing.
 
     Returns None the first time an airline is seen: the caller renders the code
-    badge, and the logo appears on a later poll. That is deliberate — nothing
-    here ever waits for the network.
+    badge, and the logo appears on a later poll — nothing here ever waits for the
+    network.
     """
-    icao = (icao or "").strip().upper()
-    if not re.fullmatch(r"[A-Z0-9]{2,4}", icao):
-        return None
-    now = time.time()
-    with _LOGO_LOCK:
-        state = _LOGO_MEMORY.get(icao)
-        if state:
-            if state["data"]:
-                return state["data"]
-            if state["busy"] or now - state["at"] < LOGO_RETRY_AFTER:
-                return None                       # already being fetched, or a fresh miss
-        if _LOGO_OFFLINE_UNTIL > now:
-            return None                           # we know the network is down: don't queue
-    data = _read_logo_file(icao)
-    if data:
-        with _LOGO_LOCK:
-            _LOGO_MEMORY[icao] = {"data": data, "at": time.time(), "busy": False}
-        return data
-    _start_logo_fetch(icao)
-    return None
-
-
-def _start_logo_fetch(icao: str) -> None:
-    with _LOGO_LOCK:
-        state = _LOGO_MEMORY.setdefault(icao, {"data": None, "at": 0.0, "busy": False})
-        if state["busy"]:
-            return
-        state["busy"] = True
-    threading.Thread(target=_fetch_logo, args=(icao,), daemon=True).start()
-
-
-def _fetch_logo(icao: str) -> None:
-    """Background worker: fetch one logo, keep it on disk, remember how it went."""
-    global _LOGO_OFFLINE_UNTIL, _LOGO_FAILURES
-    data = None
-    network_error = False
-    with _LOGO_SLOTS:
-        try:
-            request = Request(LOGO_BASE_URL.format(icao=icao),
-                              headers={"User-Agent": LOGO_USER_AGENT})
-            with urlopen(request, timeout=LOGO_TIMEOUT) as response:
-                if int(getattr(response, "status", 0) or 0) == 200:
-                    data = response.read(LOGO_MAX_BYTES + 1)
-        except HTTPError as error:
-            # A 4xx is "this airline has no logo file", not "the internet is down":
-            # it must not count towards standing the fetcher down.
-            network_error = error.code >= 500
-        except (URLError, OSError, ValueError):
-            network_error = True
-    if data is not None and (len(data) > LOGO_MAX_BYTES or data[:8] != b"\x89PNG\r\n\x1a\n"):
-        data = None                    # an error page or a truncated download
-        network_error = True
-    now = time.time()
-    with _LOGO_LOCK:
-        _LOGO_MEMORY[icao] = {"data": data, "at": now, "busy": False}
-        if data:
-            _LOGO_FAILURES = 0
-        elif network_error:
-            _LOGO_FAILURES += 1
-            # Say it, and stand the fetcher down — ONCE. Reaching the threshold
-            # again (a couple of airlines can fail in the same second) must not
-            # print a second line, or the log grows a line per airline.
-            if _LOGO_FAILURES >= LOGO_FAILURES_BEFORE_OFFLINE and _LOGO_OFFLINE_UNTIL <= now:
-                _LOGO_OFFLINE_UNTIL = now + LOGO_OFFLINE_AFTER
-                print(f"kiosk-flight: airline logos unreachable; not retrying for "
-                      f"{int(LOGO_OFFLINE_AFTER / 60)} minutes (the monogram badge is shown)", flush=True)
-    if not data:
-        return
-    try:
-        directory = _logo_path(icao).parent
-        directory.mkdir(parents=True, exist_ok=True)
-        temporary = directory / f"{icao}.tmp"
-        temporary.write_bytes(data)
-        temporary.replace(_logo_path(icao))
-    except OSError:
-        pass                           # a read-only /data costs a re-fetch, never a failure
+    return LOGO_CACHE.get(icao)
 
 
 def logo_data_uri(icao: str) -> str:
@@ -683,6 +794,115 @@ def logo_data_uri(icao: str) -> str:
     if not data:
         return ""
     return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+
+# --------------------------------------------------------------------------- #
+# Aircraft images (per airline + type)
+#
+# The dashboard can show a picture of the actual airliner — an airline's livery
+# on the type the sensor reports — instead of a drawn silhouette. Two sources,
+# in this order, both private to the machine that runs the app:
+#
+#   1. a keyed API, configured in the app options as a URL template
+#      (image_api_url with {icao}, {type} and {key} placeholders) — the shape
+#      most aviation-asset APIs use, e.g. logostream's livery endpoint;
+#   2. a local image library directory (image_library, default /data/liveries):
+#      <ICAO>_<TYPE>.jpg or a file named by index.json — for artwork the user has
+#      licensed or collected themselves.
+#
+# Anything else falls back to the vendored silhouettes, so a display never shows
+# nothing. **No image bytes are ever stored in the repository**: this is the
+# user's own material, kept under /data, exactly like the logo cache.
+# --------------------------------------------------------------------------- #
+IMAGE_TIMEOUT = 15.0
+IMAGE_MAX_BYTES = 900_000
+IMAGE_RETRY_AFTER = 3600.0
+IMAGE_OFFLINE_AFTER = 1800.0
+IMAGE_FAILURES_BEFORE_OFFLINE = 3
+IMAGE_MAX_PARALLEL = 3
+IMAGE_USER_AGENT = LOGO_USER_AGENT
+
+
+def image_enabled(config: dict) -> bool:
+    return str(config.get("typeImage", DEFAULTS["typeImage"])) == "image"
+
+
+def image_directory() -> Path:
+    configured = as_text(option("image_library"), 200)
+    return Path(configured) if configured else DATA_FILE.parent / "liveries"
+
+
+def image_url(key: str) -> str:
+    template = as_text(option("image_api_url"), 400)
+    if not template:
+        return ""
+    icao, _, code = key.partition("_")
+    try:
+        return template.format(icao=icao, type=code, key=as_text(option("image_api_key"), 200))
+    except (KeyError, IndexError, ValueError):
+        return template
+
+
+def image_headers() -> dict:
+    api_key = as_text(option("image_api_key"), 200)
+    headers = {"User-Agent": IMAGE_USER_AGENT, "Accept": "image/*"}
+    if api_key:
+        # Aviation asset APIs differ on the header name; send both rather than
+        # make the user care (logostream documents x-api-key).
+        headers["x-api-key"] = api_key
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+IMAGE_CACHE = AssetCache(
+    "aircraft images",
+    directory=image_directory,
+    url_for=image_url,
+    headers=image_headers,
+    accepts=is_artwork, timeout=IMAGE_TIMEOUT, max_bytes=IMAGE_MAX_BYTES,
+    retry_after=IMAGE_RETRY_AFTER, offline_after=IMAGE_OFFLINE_AFTER,
+    failures_before_offline=IMAGE_FAILURES_BEFORE_OFFLINE,
+    max_parallel=IMAGE_MAX_PARALLEL, key_pattern=r"[A-Z0-9]{2,4}_[A-Z0-9]{2,6}",
+    hint=" (the drawn silhouette is shown)")
+
+
+def aircraft_image_key(row: dict) -> str:
+    icao = str(row.get("airlineIcao") or "").strip().upper()
+    code = str(row.get("code") or "").strip().upper()
+    if not icao or not code or code == "GRND":
+        return ""
+    return f"{icao}_{code}"
+
+
+def aircraft_image_uri(row: dict) -> str:
+    key = aircraft_image_key(row)
+    if not key:
+        return ""
+    data = IMAGE_CACHE.get(key)
+    if not data:
+        return ""
+    return f"data:{guess_mime(data)};base64," + base64.b64encode(data).decode("ascii")
+
+
+def aircraft_images(flights: list, config: dict) -> dict:
+    """Data URIs for the aircraft pictures a payload shows, keyed `<ICAO>_<TYPE>`.
+
+    Deduplicated like the logos: four Ryanair 737s must not carry the same JPEG
+    four times over the LAN.
+    """
+    if not image_enabled(config):
+        return {}
+    images = {}
+    seen = set()
+    for row in flights:
+        key = aircraft_image_key(row)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        uri = aircraft_image_uri(row)
+        if uri:
+            images[key] = uri
+    return images
 
 
 def airline_logos(flights: list, config: dict) -> dict:
@@ -733,6 +953,7 @@ def flight_rows(config: dict) -> dict:
         "total": 0,
         "flights": [],
         "logos": {},
+        "images": {},
         "error": "",
         "warning": "",
         "centre": None,
@@ -882,6 +1103,8 @@ def flight_rows(config: dict) -> dict:
     # The airline logos for exactly these aircraft, as data: URIs (see the logo
     # section above for why the page never fetches them itself).
     payload["logos"] = airline_logos(payload["flights"], config)
+    # The real airline/type pictures, same idea (see the image section above).
+    payload["images"] = aircraft_images(payload["flights"], config)
     if total > limit:
         payload["warning"] = f"Showing {limit} of {total} aircraft overhead."
 
@@ -957,6 +1180,8 @@ def clean_display(payload: dict, existing: dict = None) -> dict:
         combined["airlineLogo"] = DEFAULTS["airlineLogo"]
     if combined["typeGraphic"] not in TYPE_GRAPHIC_KEYS:
         combined["typeGraphic"] = DEFAULTS["typeGraphic"]
+    if combined["typeImage"] not in TYPE_IMAGE_KEYS:
+        combined["typeImage"] = DEFAULTS["typeImage"]
 
     latitude = as_float(combined.get("latitude"))
     longitude = as_float(combined.get("longitude"))
@@ -1146,6 +1371,14 @@ aircraft, and it refreshes with the radar.</p>
 <label class="check"><input type="checkbox" name="detailAuto" data-flag> Switch to it when only one aircraft is left</label>
 <label class="check"><input type="checkbox" name="detailClick" data-flag> Open it when an aircraft is tapped
   (tap again to go back)</label>
+<label>Aircraft image<select name="typeImage">
+  <option value="silhouette">Drawn silhouette — nothing fetched</option>
+  <option value="image">Real picture — the airline's livery on this type</option></select>
+  <span class="hint">Looks for a picture of <em>this airline on this aircraft type</em>: first in the
+  image library configured in the app options (<code>image_library</code>, default
+  <code>/data/liveries</code>), then from a keyed API if <code>image_api_url</code> is set. Whatever it
+  finds is kept under <code>/data</code> — never in the app's own files. When there is no picture, the
+  silhouette above is shown instead, so the display never comes up empty.</span></label>
 <label>Aircraft type graphic<select name="typeGraphic">
   <option value="top">Top-down — the plan view</option>
   <option value="side">Side view — a profile of the type</option></select>
@@ -1245,7 +1478,7 @@ function resetForm(){
   field('accent','#7dd3fc');field('maxFlights','6');field('rangeKm','0');field('refreshInterval','20');
   field('sortBy','nearest');field('units','metric');field('centreMode','home');field('showType','false');
   field('detailAlways','false');field('detailAuto','false');field('detailClick','false');
-  field('airlineLogo','image');field('typeGraphic','top');
+  field('airlineLogo','image');field('typeGraphic','top');field('typeImage','silhouette');
   syncOutputs();
 }
 function syncFlags(){for(var i=0;i<f.elements.length;i++){var el=f.elements[i];
