@@ -77,6 +77,9 @@ DEFAULTS = {
     # by the app, on the machine that runs it — never by the kiosk — and kept on
     # disk) or the monogram badge, which needs nothing but the code.
     "airlineLogo": "image",
+    # How the aircraft type is drawn: "top" (the familiar plan view) or "side"
+    # (a profile). Both sets are vendored and inlined; see the icon section.
+    "typeGraphic": "top",
     # Per-element text sizes, as a percentage of the design size (100 = as designed).
     "sizeCount": "100",
     "sizeTitle": "100",
@@ -91,6 +94,7 @@ SIZE_KEYS = ("sizeCount", "sizeTitle", "sizeInfo", "sizeCallsign", "sizeDetails"
              "sizeFooter", "sizeGrid", "sizeDetail")
 DETAIL_FLAGS = ("detailAlways", "detailAuto", "detailClick")
 LOGO_KEYS = ("image", "monogram")
+TYPE_GRAPHIC_KEYS = ("top", "side")
 SORT_KEYS = ("nearest", "lowest", "highest", "fastest", "callsign")
 UNIT_KEYS = ("metric", "aviation", "imperial")
 CENTRE_KEYS = ("home", "custom")
@@ -495,6 +499,39 @@ def aircraft_icon(code: str, model: str, category: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Top-down -> side view
+#
+# The side profiles are a smaller set than the plan views, because a profile
+# distinguishes aircraft by class — engine count, wing position, propellers, tail
+# — and not by family. So this maps the already-resolved plan-view icon onto the
+# profile that matches it: a 737 and an A320 share one, a 777 and a 787 share a
+# heavier one, a 747's four engines get their own. Anything with no profile (a
+# balloon, a drone, a ground vehicle) keeps its plan view rather than being given
+# a wrong profile.
+# --------------------------------------------------------------------------- #
+SIDE_BY_ICON = {
+    "a320": "side-jet", "b737": "side-jet", "a5": "side-jet", "a4": "side-jet",
+    "a6": "side-jet",
+    "a330": "side-heavy", "b767": "side-heavy", "b777": "side-heavy",
+    "b787": "side-heavy", "md11": "side-heavy",
+    "a340": "side-quad", "a380": "side-quad", "b747": "side-quad",
+    "crjx": "side-regional", "erj": "side-regional", "e195": "side-regional",
+    "f100": "side-regional",
+    "a0": "side-bizjet", "a2": "side-bizjet", "a3": "side-bizjet",
+    "fa7x": "side-bizjet", "glf5": "side-bizjet", "learjet": "side-bizjet",
+    "a1": "side-turboprop", "dh8a": "side-turboprop", "c130": "side-turboprop",
+    "cessna": "side-light",
+    "b1": "side-glider",
+    "a7": "side-heli",
+}
+
+
+def side_view_icon(icon: str) -> str:
+    """The side profile for a plan-view icon, or the icon itself if none fits."""
+    return SIDE_BY_ICON.get(icon, icon)
+
+
+# --------------------------------------------------------------------------- #
 # Airline logos
 #
 # The dashboard can show the airline's actual logo instead of a code badge. The
@@ -802,6 +839,10 @@ def flight_rows(config: dict) -> dict:
         row["name"] = (row["callsign"] or row["flight"] or row["registration"]
                        or "Unknown flight")
         row["icon"] = aircraft_icon(row["code"], row["model"], row["category"])
+        # Which set the display asked for. Both names travel nowhere else: the
+        # page just looks up `icon` in the map it was given.
+        if str(config.get("typeGraphic", DEFAULTS["typeGraphic"])) == "side":
+            row["icon"] = side_view_icon(row["icon"])
         trail = []
         for point in (flight.get("coordinates") or [])[-40:]:
             if not isinstance(point, (list, tuple)) or len(point) < 2:
@@ -914,6 +955,8 @@ def clean_display(payload: dict, existing: dict = None) -> dict:
         combined["units"] = "metric"
     if combined["airlineLogo"] not in LOGO_KEYS:
         combined["airlineLogo"] = DEFAULTS["airlineLogo"]
+    if combined["typeGraphic"] not in TYPE_GRAPHIC_KEYS:
+        combined["typeGraphic"] = DEFAULTS["typeGraphic"]
 
     latitude = as_float(combined.get("latitude"))
     longitude = as_float(combined.get("longitude"))
@@ -1103,6 +1146,13 @@ aircraft, and it refreshes with the radar.</p>
 <label class="check"><input type="checkbox" name="detailAuto" data-flag> Switch to it when only one aircraft is left</label>
 <label class="check"><input type="checkbox" name="detailClick" data-flag> Open it when an aircraft is tapped
   (tap again to go back)</label>
+<label>Aircraft type graphic<select name="typeGraphic">
+  <option value="top">Top-down — the plan view</option>
+  <option value="side">Side view — a profile of the type</option></select>
+  <span class="hint">Both sets are drawn locally and matched to the type the sensor reports
+  (<code>aircraft_code</code>). The profile set distinguishes <em>class</em> — twin-jet, widebody,
+  four-engine, regional, business jet, turboprop, light aircraft, helicopter, glider — so an A321
+  and a 737 share a profile; anything with no profile (a drone, a balloon) keeps its plan view.</span></label>
 <label>Airline logo<select name="airlineLogo">
   <option value="image">The airline's own logo</option>
   <option value="monogram">Monogram badge — its code, nothing fetched</option></select>
@@ -1195,7 +1245,7 @@ function resetForm(){
   field('accent','#7dd3fc');field('maxFlights','6');field('rangeKm','0');field('refreshInterval','20');
   field('sortBy','nearest');field('units','metric');field('centreMode','home');field('showType','false');
   field('detailAlways','false');field('detailAuto','false');field('detailClick','false');
-  field('airlineLogo','image');
+  field('airlineLogo','image');field('typeGraphic','top');
   syncOutputs();
 }
 function syncFlags(){for(var i=0;i<f.elements.length;i++){var el=f.elements[i];

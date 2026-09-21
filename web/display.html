@@ -167,6 +167,13 @@
   /* The source art has a different viewBox (and aspect) per icon, so the icon  */
   /* is given a square box and `preserveAspectRatio` centres it inside.         */
   #acdetail .ad-schematic svg{height:100%;width:calc(44vmin * var(--ds));display:block}
+  /* A side profile is a wide, short drawing (~2.7:1) where the plan views are  */
+  /* square: give it a wider box. The height stays the base rule's, and the SVG  */
+  /* fills the box, so the drawing scales to fit inside it at whatever aspect it */
+  /* has — the helicopter profile is 1.7:1 and would overflow a kiosk screen if  */
+  /* the box grew to its height instead.                                         */
+  #acdetail .ad-schematic.side{width:calc(58vmin * var(--ds))}
+  #acdetail .ad-schematic.side svg{width:100%;height:100%}
   /* Aircraft type and altitude: the type is the interesting line, so it is the
      larger of the two and the altitude (which the schematic and the trend already
      imply is "up there") is smaller. Neither competes with the flight number. */
@@ -457,6 +464,10 @@
     // The schematic, plus what it is a schematic OF — an icon on its own leaves
     // the viewer guessing which A320-family member it stands for.
     var icon = flight.icon ? ICONS[flight.icon] : '';
+    // The profile set is wide and short, the plan views are square: the box has
+    // to know which it is holding (a profile in the square box floats in empty
+    // space, and a plan view in the wide box gets stretched thin).
+    el.schematic.className = 'ad-schematic' + (icon && flight.icon.indexOf('side-') === 0 ? ' side' : '');
     el.schematic.innerHTML = icon || '';
     if (!icon) {
       // Nothing to draw (an airport vehicle, or an icon the app does not ship):

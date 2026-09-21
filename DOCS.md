@@ -110,6 +110,7 @@ The shared access token lives in `/data/access_token` — deliberately **not** i
 | **Single-aircraft dashboard** — *Switch to it when only one aircraft is left* | the radar hands over automatically when exactly one aircraft is in the area, and comes back when a second appears |
 | **Single-aircraft dashboard** — *Open it when an aircraft is tapped* | a tap opens the dashboard for **that** aircraft instead of the bottom detail strip; a tap on the dashboard returns to the radar. If the tapped aircraft leaves the area, the radar comes back |
 | **Airline logo** | *The airline's own logo* — the **app** fetches it once per airline (the kiosk never does), keeps it under `/data/logos` and embeds it in the page; *Monogram badge* — the airline's code on a coloured square, nothing fetched at all |
+| **Aircraft type graphic** | *Top-down* — the familiar plan view (37 silhouettes, per family); *Side view* — a profile of the type (9 profiles, per class: twin-jet, widebody, four-engine, regional, business jet, turboprop, light, helicopter, glider). Both sets are local; see "Aircraft icons and the type schematic" |
 
 All three dashboard switches are off by default, so an existing display never changes behaviour on
 upgrade. Ticked together they combine: a display that is a dashboard, whose radar returns whenever
@@ -124,7 +125,8 @@ One aircraft, the whole screen, refreshed on the same interval as the radar:
   the badge is a bare code (setting off, logo not fetched yet, or the airline has no logo file). See
   "Airline logos" below;
 * **the flight number** (`flight_number`, falling back to the callsign);
-* **a top-down schematic of the aircraft type** (below);
+* **a top-down schematic of the aircraft type** (below), or a **side profile** if the display is set
+  that way — the same slot, sized for the drawing it is holding;
 * **the aircraft type** as text (`aircraft_model` with the ICAO code beside it) — the largest line
   under the schematic;
 * **the altitude**, in the display's units, smaller than the type — or `ON THE GROUND` for a taxiing
@@ -224,12 +226,29 @@ somewhere else (not `zone.home`) is still correct.
 
 ## Aircraft icons and the type schematic
 
-The dashboard draws a top-down silhouette of the aircraft **type**, matched from the ICAO type
-designator the sensor already reports (`aircraft_code`: `A320`, `B38M`, `AW189`, …).
+The dashboard draws a silhouette of the aircraft **type**, matched from the ICAO type designator the
+sensor already reports (`aircraft_code`: `A320`, `B38M`, `AW189`, …), in either of two sets — the
+display's *Aircraft type graphic* setting:
+
+| | Top-down (default) | Side view |
+|---|---|---|
+| What it is | the plan view, as if looking down | a profile, as if standing beside it |
+| How many | 37 silhouettes | 9 profiles |
+| Matched by | **family**: `A321`/`A20N` → the A320 icon, `B38M`/`B739` → the 737 | **class**: twin-jet, widebody, four-engine, regional, business jet, turboprop, light aircraft, helicopter, glider |
+| Best for | showing what is overhead and where it is pointing | showing what the aircraft *is* |
+
+A profile distinguishes aircraft by class — engine count, wing position, propellers, tail — so an
+A321 and a 737 share one; a 777 and a 787 share the heavier one; a 747, an A340 and an A380 share
+the four-engine one. Anything with no profile (a drone, a balloon, a hang glider, an airport
+vehicle) keeps its plan view rather than being handed a wrong profile.
+
+### Where the artwork comes from
 
 There is no free, offline, per-type image database to look this up in — Flightradar24 publishes
-airline logos and photographs, neither of which answers "what does an A321 look like from above"
-— so the app **vendors** a set of 37 real silhouettes:
+airline logos and photographs, neither of which answers "what does an A321 look like from above" —
+so the app **vendors** its artwork:
+
+**Top-down set (37 silhouettes)** — ADS-B Radar for macOS:
 
 > Icons by **ADS-B Radar** for macOS — <https://adsb-radar.com> —
 > <https://apps.apple.com/app/id1538149835>
@@ -239,18 +258,24 @@ airline logos and photographs, neither of which answers "what does an A321 look 
 > unchanged (`Flightradar24 via Home Assistant`); the dashboard has none, deliberately — a
 > full-screen dashboard with a footer is the thing this was asked to stop being.
 
-* Artwork: `vendor/adsb-radar/*.svg` (unmodified, with the package's own readme), plus a note in
-  `vendor/adsb-radar/README.md` on why this set and what the licence requires.
-* Build step: `python3 tools/build_aircraft_icons.py` turns them into `web/aircraft_icons.json`
-  (strips the editor's grid guides, recolours every fill/stroke to `currentColor`, minifies).
-  **Re-run it if you add or change an icon.** The app reads that JSON at startup and inlines it
-  into the display page, so the kiosk never fetches an image and the admin's `srcdoc` preview
-  works too.
-* Matching (`ICON_BY_CODE` / `ICON_BY_CATEGORY` / `ICON_BY_MODEL` and `aircraft_icon()` in `app.py`)
-  is at **family level**, which is what
-  a type designator can honestly support: `A321` and `A20N` both draw the A320 icon, `B38M` and
-  `B739` the 737, `AW189`/`EC35`/`R44` the helicopter. The order is type designator → category →
-  the words in `aircraft_model` → a generic twin-jet airliner (`a5`).
+**Side-view set (9 profiles)** — two converted from **sisl/aircraftshapes** (MIT, Stanford
+Intelligent Systems Laboratory — `vendor/aircraftshapes/`, licence kept verbatim), the other seven
+authored in this repository in the same flat style. Full provenance per file:
+`vendor/side-views/README.md`.
+
+### How it is wired
+
+* Artwork: `vendor/adsb-radar/*.svg` and `vendor/side-views/*.svg` (both unmodified as vendored;
+  the side set is generated by `tools/build_side_views.py`).
+* Build step: `python3 tools/build_aircraft_icons.py` folds both sets into
+  `web/aircraft_icons.json` (strips editor grid guides, recolours every fill/stroke to
+  `currentColor`, minifies). **Re-run it after changing any icon**, and re-run
+  `tools/build_side_views.py` first if the profiles themselves changed. The app reads that JSON at
+  startup and inlines it into the display page, so the kiosk never fetches an image and the admin's
+  `srcdoc` preview works too.
+* Matching lives in `app.py`: `ICON_BY_CODE` / `ICON_BY_CATEGORY` / `ICON_BY_MODEL` pick the plan
+  view (type designator → category → the words in `aircraft_model` → a generic twin-jet airliner,
+  `a5`), and `SIDE_BY_ICON` maps that onto a profile.
 * Airport **ground vehicles** (`GRND`) get no schematic on purpose: drawing an aeroplane for a
   fuel truck would be a lie, so the dashboard falls back to the plain plane glyph.
 
@@ -309,6 +334,8 @@ footer). If you ever republish this app for others, that is the part to re-check
 | "Display error" on screen | a client-side render failure. It is shown deliberately: a swallowed error used to leave a blank scope with no explanation. On a display set to be a dashboard the radar is brought forward to show it, because the dashboard covers the notice |
 | The dashboard shows "NO AIRCRAFT IN THE AREA" | exactly that: nothing airborne in the sensor's own area (the same condition as the empty radar, which prints the full explanation) |
 | The dashboard shows a twin-jet airliner for something odd | the type is not in the icon table and nothing in the category or model matched, so `a5` is the deliberate last resort — add the designator to `ICON_BY_CODE` in `app.py` |
+| Side view shows an airliner for a 747 | that is by design at *class* level: `quad` covers 747/A340/A380, `heavy` covers 777/787/A330/767, `jet` covers A320/737. Nine profiles cannot be thirty-seven families — switch back to *Top-down* if you want the family silhouette |
+| A drone or balloon still shows a plan view in side-view mode | deliberate: there is no profile for them, so the plan view is kept rather than showing a wrong profile |
 | Tapping an aircraft opens a different one's dashboard | the tap landed on a label that overlaps the glyph; the label is what is on top, so it is what opens |
 | The dashboard is on screen for the wrong aircraft | it shows the **closest** aircraft unless it was opened by a tap; a tapped aircraft is followed until it leaves the area |
 | No airline logo, just the code badge | three normal cases: the logo has not been fetched yet (it appears on a later poll), the airline has no logo file at Flightradar24 (14 of the 65 airlines this sensor sees), or the display is set to *Monogram badge*. A *Home Assistant with no internet* logs `airline logos unreachable` once and then stops trying for 30 minutes |

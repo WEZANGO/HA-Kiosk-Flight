@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
-"""Build web/aircraft_icons.json from the vendored ADS-B Radar silhouettes.
+"""Build web/aircraft_icons.json from the vendored aircraft artwork.
 
     python3 tools/build_aircraft_icons.py
 
-Why a build step at all: the icons ship as standalone SVG *files*, and this app
+Two sets go in, under one map, because the display page only ever needs one of
+them for a given display:
+
+  * the top-down silhouettes from ADS-B Radar (vendor/adsb-radar/, see its README)
+    — keys are their file stems: ``a320``, ``b737``, ``cessna`` …
+  * the side-view profiles (vendor/side-views/, built by tools/build_side_views.py)
+    — keys are prefixed ``side-``: ``side-jet``, ``side-heli`` …
+
+Why a build step at all: the artwork ships as standalone SVG *files*, and this app
 never lets the kiosk fetch an image — the page arrives with its icons embedded
 (a page rendered from `srcdoc` in the admin preview has no base URL to fetch
 from, and a kiosk on a VLAN with no internet has nowhere to fetch from anyway).
@@ -30,6 +38,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "vendor" / "adsb-radar"
+SIDE_SOURCE = ROOT / "vendor" / "side-views"
 TARGET = ROOT / "web" / "aircraft_icons.json"
 
 COLOUR = r"(?:#[0-9a-fA-F]{3,8}|rgb\([^)]*\)|[a-zA-Z]+)"
@@ -63,10 +72,16 @@ def main() -> None:
         icons[path.stem] = normalise(path.read_text())
     if not icons:
         raise SystemExit(f"no icons found in {SOURCE}")
+    # Side views are already normalised by tools/build_side_views.py; they are only
+    # prefixed here so the two sets cannot collide in one map.
+    side = 0
+    for path in sorted(SIDE_SOURCE.glob("*.svg")):
+        icons[f"side-{path.stem}"] = normalise(path.read_text())
+        side += 1
     payload = json.dumps(icons, separators=(",", ":"), sort_keys=True)
     TARGET.write_text(payload + "\n")
-    print(f"{len(icons)} icons -> {TARGET.relative_to(ROOT)} "
-          f"({len(payload) / 1024:.1f} KB)")
+    print(f"{len(icons)} icons ({side} of them side views) -> "
+          f"{TARGET.relative_to(ROOT)} ({len(payload) / 1024:.1f} KB)")
     print("names:", " ".join(sorted(icons)))
 
 

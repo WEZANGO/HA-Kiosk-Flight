@@ -9,12 +9,13 @@ It has two full-screen views, from one display and one settings set:
 
 * the **radar** — every aircraft in the sensor's area, plotted and labelled;
 * the **single-aircraft dashboard** — the whole screen for one aircraft: its **airline logo**,
-  flight number, a top-down **schematic of the aircraft type**, altitude and
+  flight number, a **schematic of the aircraft type** (top-down, or a **side-view profile** —
+  the display's choice), altitude and
   origin → destination. It can *be* the display (standalone), or the radar can switch to it
   automatically when only one aircraft is left, or when an aircraft is tapped.
 
-> **Status: v0.2.2 — the dashboard and the airline logos were added and verified against live
-> traffic; the v0.1.x radar behaviour is unchanged.**
+> **Status: v0.3.0 — the dashboard, the airline logos and the side-view profiles were added and
+> verified against live traffic; the v0.1.x radar behaviour is unchanged.**
 
 ## Start here
 
@@ -24,25 +25,46 @@ It has two full-screen views, from one display and one settings set:
 | `HOME_ASSISTANT_ADDON_GUIDE.md` | the handoff guide this app was built from: file skeleton, settings design, the three auth channels, local testing, shipping conventions |
 | `app.py` | single-file stdlib-only server: display store, admin UI, display page, APIs, the aircraft-type → icon table |
 | `web/display.html` | the kiosk page — local SVG radar **and** the single-aircraft dashboard, tap-for-detail |
-| `web/aircraft_icons.json` | generated: the aircraft silhouettes, inlined into the page (never fetched) |
-| `vendor/adsb-radar/` | the vendored icon artwork, its licence and the attribution it requires |
-| `tools/build_aircraft_icons.py` | re-normalises the artwork into `web/aircraft_icons.json` |
+| `web/aircraft_icons.json` | generated: the aircraft silhouettes (both sets), inlined into the page (never fetched) |
+| `vendor/adsb-radar/` | the vendored top-down icon artwork, its licence and the attribution it requires |
+| `vendor/side-views/` | the side-view profiles (generated) and per-file provenance |
+| `vendor/aircraftshapes/` | the MIT TikZ shape library two of those profiles are converted from |
+| `tools/build_aircraft_icons.py` | folds both artwork sets into `web/aircraft_icons.json` |
+| `tools/build_side_views.py` | generates the side-view profiles from the MIT geometry + authored polygons |
 | `/data/logos/<ICAO>.png` | *(runtime, not in the repo)* airline logos fetched once by the app — it is the only thing this app ever fetches from the internet |
 
 ## Aircraft icons
 
-The aircraft schematics are **not** mine and are not free-floating: they come from
-[ADS-B Radar for macOS](https://adsb-radar.com) (37 top-down aircraft silhouettes, free for
-personal and commercial use in exchange for a backlink), and that backlink is repeated in
-`vendor/adsb-radar/README.md`, `DOCS.md` and the app's own admin page — the radar display keeps its
-`Flightradar24 via Home Assistant` credit line, and the dashboard has no footer at all (asked for).
-The airline logos are fetched at runtime, by the app, from Flightradar24's own operator set,
-and are the airlines' marks (see "Airline logos" in `DOCS.md`).
+The aircraft schematics are **not** mine and are not free-floating:
+
+* the **top-down** silhouettes come from [ADS-B Radar for macOS](https://adsb-radar.com) (37 plan
+  views, free for personal and commercial use in exchange for a backlink), repeated in
+  `vendor/adsb-radar/README.md`, `DOCS.md` and the app's own admin page — the radar display keeps its
+  `Flightradar24 via Home Assistant` credit line, and the dashboard has no footer at all (asked for);
+* the **side-view** profiles are nine: two converted from
+  [sisl/aircraftshapes](https://github.com/sisl/aircraftshapes) (**MIT**, noticed in
+  `vendor/aircraftshapes/LICENSE.txt`), the other seven authored here;
+* the **airline logos** are fetched at runtime, by the app, from Flightradar24's own operator set,
+  and are the airlines' marks (see "Airline logos" in `DOCS.md`).
 
 ## Verified
 
-*(Everything below is measured against the running app; v0.2.x additions are marked.)*
+*(Everything below is measured against the running app; v0.2.x/v0.3.x additions are marked.)*
 
+* **The side-view profiles (v0.3.0)**: every one of 13 real type codes lands on the intended profile
+  (`A320`/`B738` → twin-jet, `B77W`/`B789` → widebody, `B748`/`A388` → four-engine, `E195` →
+  regional, `C56X`/`GLF6` → business jet, `AT76`/`C130` → turboprop, `C172` → light, `A189` →
+  helicopter), and the three types with no profile (drone, balloon, hang glider) keep their plan
+  view rather than getting a wrong one. In the browser, the profile is measured as **wide** (art
+  ratio 2.66) where the same aircraft's plan view is **square** (1.00 in a 475×302 box) — the two
+  modes are provably different renders, not the same drawing relabelled.
+* **The tallest profile was tested against the layout, not assumed safe**: the helicopter profile is
+  1.7:1 where the airliner's is 2.7:1, so it is the one that could push the block off a 1080-tall
+  screen. Injected into the live page and measured, the block still ends at 989 px of 1080.
+* **Nine profiles were drawn, looked at, and fixed twice** before they were wired in — the first
+  cut had every authored profile upside down (y-axis convention mixed with the converted ones) and
+  its engine pods and propellers floating in the sky; the contact sheet caught what a diff of the
+  SVG files could not.
 * **The airline logo, in real pixels, including the reported case** (v0.2.1): a fixture pinned to
   a live Aer Lingus aircraft shows the Aer Lingus wordmark **loaded** as an `<img>` on a light
   plate (`naturalWidth 140`, on-screen box 140×27 inside a 164×97 badge, plate
@@ -176,5 +198,15 @@ Reference implementations to read alongside this one:
   network failures = the fetcher stands down for 30 minutes and says so in the log), and treats 404
   as "this airline has no file", not "the internet is down". It also only ever asks for airlines the
   display is actually showing.
+* **Converting third-party vector art needs one coordinate convention, held in one place.**
+  The side profiles come from two sources — a TikZ library whose y axis points up, and polygons
+  authored here — and the first attempt flipped y in the *converter*, so only the converted art came
+  out right: every authored profile was upside down and, because the flip had already been spent,
+  the engine pods floated in the sky. Normalise the convention at the single point that emits SVG.
+* **A drawing's aspect ratio is a layout input, not a detail.** The profile set ranges from 2.7:1
+  (airliner) to 1.7:1 (helicopter): one shared box sized from the *width* overflowed the screen for
+  the tall one. Fix: size the box, let the SVG fill it and letterbox its own art
+  (`preserveAspectRatio` already does this) — then test the tallest member, by injecting it, instead
+  of waiting for one to fly over.
 * Any sensor in Home Assistant that publishes a `flights` list with positions can drive a display —
   the sensor picker is not hard-coded to Flightradar24.
