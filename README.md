@@ -14,9 +14,11 @@ It has two full-screen views, from one display and one settings set:
   origin → destination. It can *be* the display (standalone), or the radar can switch to it
   automatically when only one aircraft is left, or when an aircraft is tapped.
 
-> **Status: v0.4.0 — the dashboard, airline logos, side-view profiles and real per-airline
+> **Status: v0.4.2 — the dashboard, airline logos, side-view profiles and real per-airline
 > aircraft pictures were added and verified against live traffic; the v0.1.x radar behaviour is
-> unchanged.**
+> unchanged. v0.4.2 gives the airline badge one white plate, repaints the coloured backing plate
+> inside fetched logo artwork, and adds your own logos (by airline name or code, with an admin
+> panel).**
 
 ## Start here
 
@@ -32,7 +34,7 @@ It has two full-screen views, from one display and one settings set:
 | `vendor/aircraftshapes/` | the MIT TikZ shape library two of those profiles are converted from |
 | `tools/build_aircraft_icons.py` | folds both artwork sets into `web/aircraft_icons.json` |
 | `tools/build_side_views.py` | generates the side-view profiles from the MIT geometry + authored polygons |
-| `/data/logos/<ICAO>.png` | *(runtime, not in the repo)* airline logos fetched once by the app — it is the only thing this app ever fetches from the internet |
+| `/data/logos/` | *(runtime, not in the repo)* **your own** airline logos — any image file named after the airline or its code. Fetched artwork is cached in `/data/logos/.fetched/` (the only thing this app ever fetches from the internet) |
 
 ## Aircraft icons
 
@@ -46,7 +48,8 @@ The aircraft schematics are **not** mine and are not free-floating:
   [sisl/aircraftshapes](https://github.com/sisl/aircraftshapes) (**MIT**, noticed in
   `vendor/aircraftshapes/LICENSE.txt`), the other seven authored here;
 * the **airline logos** are fetched at runtime, by the app, from Flightradar24's own operator set,
-  and are the airlines' marks (see "Airline logos" in `DOCS.md`).
+  and are the airlines' marks — unless you drop your own file for that airline into the logo folder,
+  which always wins (see "Airline logos" in `DOCS.md`).
 
 ## Verified
 
@@ -92,12 +95,29 @@ The aircraft schematics are **not** mine and are not free-floating:
   `rgba(238,245,255,0.94)`), which is the check that matters — "the payload has a logo" is not the
   same as "the logo is on the screen". A dark navy wordmark (Air France) is verified the same way:
   that is the case the plate exists for. Then the two fallbacks: an airline whose ICAO code has **no
-  logo file** (HiSky/HYM) shows the coloured code badge, and the *Monogram badge* setting sends
+  logo file** (HiSky/HYM) shows the code badge, and the *Code badge* setting sends
   **zero logo bytes** and shows the code — no broken images in any state.
-* **The logo pipeline's rules were each asserted** (v0.2.1): one fetch per airline cached to
-  `/data/logos/<ICAO>.png`; keys are ICAO codes (`EIN`) not IATA (`EI`, which 404s); a second poll
-  is byte-identical and re-fetches nothing; every payload key belongs to an airline actually in that
-  payload; and a 404 is not treated as "the internet is down".
+* **The logo pipeline's rules were each asserted** (v0.2.1): one fetch per airline cached to disk
+  (now `/data/logos/.fetched/<ICAO>.png`); keys are ICAO codes (`EIN`) not IATA (`EI`, which 404s);
+  a second poll is byte-identical and re-fetches nothing; every payload key belongs to an airline
+  actually in that payload; and a 404 is not treated as "the internet is down".
+* **The white badge and the plate repaint, in real pixels** (v0.4.2, local harness + a real browser;
+  fixture aircraft, real Flightradar24 artwork): the reported case was reproduced first and fixed
+  second — `--dump-dom` after driving a poll sequence showed the badge carrying
+  `style="background: rgb(106,231,231)"` *under* a logo, and after the fix the same dump shows
+  `class="ad-badge has-logo"` with no style attribute at all. Screenshots of the same badge before
+  and after the logo arrives show the code and the logo on the same white plate, and pixel sampling
+  finds no cyan/purple left behind. The plate repaint was checked against the published artwork:
+  among 49 real logos exactly one is repainted (Thomson/TUI's blue-violet backing), and the ones that
+  depend on their plate (Norwegian's red, Jetairfly's pale blue) are left exactly as published. The
+  decoder was verified by comparing its output against Pillow, pixel for pixel, on all 49.
+* **Your own logos, driven through the admin page in a real browser** (v0.4.2, 20 assertions, all
+  passing): matching resolves by ICAO code, by IATA code, by exact name and by a name prefix
+  (`Ryanair.png` for the sensor's `Ryanair Holdings`), a file beats the fetched artwork, an upload
+  reaches the folder and appears in the panel with its thumbnail *loaded* (`naturalWidth > 0`), the
+  panel says which airline each file answers for, an unused logo says so, a rejected upload explains
+  why, delete asks twice and removes the file, and `window.__errors` is empty throughout. A file
+  whose key a later file takes over is listed as shadowed rather than hidden.
 
 * **The single-aircraft dashboard, driven in a real browser against this live Home Assistant**
   (1920×1080, 1080×1920 and the admin modal; 23 assertions, all passing): the standalone
@@ -219,6 +239,28 @@ Reference implementations to read alongside this one:
   network failures = the fetcher stands down for 30 minutes and says so in the log), and treats 404
   as "this airline has no file", not "the internet is down". It also only ever asks for airlines the
   display is actually showing.
+* **A colour set inline on an element outlives the state that set it.** The code badge took a colour
+  hashed from the airline's name; when the logo arrived on a later poll the code set `className` but
+  never cleared `style.background`, so the logo landed **on that colour** — the reported "United
+  logo has a purple background even though the image itself doesn't". A one-line CSS change hides it
+  (inline style beats any class), which is exactly why it survived: the *rendered* badge looked right
+  as long as the code badge was drawn once and never replaced. The proof came from `--dump-dom` after
+  driving the poll sequence: `<div class="ad-badge has-logo" style="background: rgb(106,231,231)">`.
+  Nothing sets a badge colour inline any more; both states share one white plate.
+* **Pure-Python PNG surgery is a reasonable ask when the box may be an i386.** Removing the coloured
+  backing plate from fetched artwork (Thomson/TUI's blue-violet box, Jetairfly's pale blue) needs
+  pixel work, and the add-on ships `python3` on Alpine with no image library. Decoding is ~60 lines
+  of `zlib` plus unfiltering for the one shape that matters (8-bit, non-interlaced, colour types
+  0/2/3/4/6); it was verified by decoding 48 real logos and comparing every pixel against Pillow —
+  exact match, including the palette and greyscale branches. The re-encode writes filter-0 RGBA, and
+  anything the reader cannot decode is passed through, so the failure mode is "the plate stays",
+  never "the logo breaks". The interesting part is the rule: a plate is repainted **white** unless
+  the mark is lighter than it (Norwegian's white wordmark, Jetairfly's pale "fly") — whitening those
+  erases them, and no tolerance tuning fixes a mark that only exists as a knockout of its plate.
+* **A folder-matched asset library needs its collisions to be visible.** Logo files match by name or
+  code, so `Aer Lingus.png` and `aerlingus.png` reduce to the same key and one silently wins. Listing
+  the folder through the key→file index hid the loser completely — a file you can see in the folder
+  and cannot delete. The panel now lists the *directory* and says which file is shadowed.
 * **Converting third-party vector art needs one coordinate convention, held in one place.**
   The side profiles come from two sources — a TikZ library whose y axis points up, and polygons
   authored here — and the first attempt flipped y in the *converter*, so only the converted art came

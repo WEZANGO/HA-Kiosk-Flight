@@ -140,9 +140,13 @@
   #acdetail .ad-inner{display:flex;flex-direction:column;align-items:center;
     justify-content:center;gap:2.2vmin;max-width:96vw}
   /* Airline: the real logo on a light plate (the badge the code used to fill),
-     or the coloured monogram when the logo is off, not fetched yet, or missing.
-     The plate exists because several airlines' wordmarks are dark blue/navy —
-     British Airways, American — and those vanish against a night-sky background.
+     or the code itself on the SAME white plate. The plate exists because several
+     airlines' wordmarks are dark blue/navy — British Airways, American — and
+     those vanish against a night-sky background.
+     One plate colour only, for both states: the code badge used to take a colour
+     hashed from the airline's name, and a badge that had already been drawn in
+     that colour kept it when the logo arrived, so the logo landed on a purple or
+     cyan rectangle. Nothing sets a badge colour inline any more.
      A logo is still never fetched by this page: the URI arrives in the payload. */
   #acdetail .ad-airline{display:flex;align-items:center;gap:2vmin}
   #acdetail .ad-badge{min-width:calc(9vmin * var(--ds));height:calc(9vmin * var(--ds));
@@ -150,8 +154,8 @@
     display:flex;align-items:center;justify-content:center;box-sizing:border-box;
     font-family:ui-monospace,Menlo,Consolas,monospace;
     font-weight:700;font-size:calc(3.6vmin * var(--ds));letter-spacing:.04em;
-    color:#05080f;background:#9fd8ff;box-shadow:0 0 3vmin rgba(125,211,252,.25)}
-  #acdetail .ad-badge.has-logo{background:rgba(238,245,255,.94);min-width:0}
+    color:#05080f;background:rgba(238,245,255,.94);box-shadow:0 0 3vmin rgba(125,211,252,.25)}
+  #acdetail .ad-badge.has-logo{min-width:0}
   #acdetail .ad-badge img{display:block;max-height:calc(6.2vmin * var(--ds));
     max-width:calc(26vmin * var(--ds));width:auto;height:auto}
   #acdetail .ad-airline-text{text-align:left;line-height:1.25;max-width:56vmin}
@@ -386,12 +390,12 @@
     return out;
   }
 
-  // A stable colour per airline, from its own code/name: same airline, same
-  // colour on every kiosk, no lookup table and nothing to fetch.
-  function airlineHue(seed) {
-    var hash = 0;
-    for (var i = 0; i < seed.length; i++) { hash = (hash * 31 + seed.charCodeAt(i)) % 360; }
-    return hash;
+  // The key the app files a logo under: the ICAO code, or — for the airlines it
+  // has no code for — the name with everything but letters and digits dropped.
+  // Mirrors logo_slug() in the app, which is what lets a file called
+  // "Aer Lingus.png" answer for a flight the sensor only names.
+  function logoKey(name) {
+    return text(name, '').toLowerCase().replace(/[^a-z0-9]/g, '');
   }
 
   // Deliberately named detailNodes, NOT detailRows: the radar already has a
@@ -448,7 +452,8 @@
     var airlineName = text(flight.airline, '');
     if (!code) { code = initials(airlineName); }
     el.airline.hidden = !(code || airlineName);
-    var logo = LOGOS[text(flight.airlineIcao, '').toUpperCase()] || '';
+    var logo = LOGOS[text(flight.airlineIcao, '').toUpperCase()]
+               || LOGOS[logoKey(airlineName)] || '';
     if (logo) {
       el.badgeLogo.src = logo;
       el.badgeLogo.alt = airlineName;
@@ -457,13 +462,16 @@
       el.badge.className = 'ad-badge has-logo';
     } else {
       // No logo yet (nothing cached, the setting is off, or the airline has no
-      // file): the coloured monogram, in the same badge, until one arrives.
+      // file): the airline's code, on the same white plate the logo would have
+      // used. No inline colour is set here — a badge painted here would still be
+      // painted when a logo arrived on a later poll, which is exactly how a logo
+      // ended up on a purple rectangle.
       el.badgeLogo.hidden = true;
       el.badgeLogo.removeAttribute('src');
       el.badgeLogo.alt = '';
       el.badgeText.textContent = code || '✈';
       el.badge.className = 'ad-badge';
-      el.badge.style.background = 'hsl(' + airlineHue(code || airlineName) + ',72%,66%)';
+      el.badge.style.background = '';
     }
     // The logo says who the airline is; the name beside it is then the same
     // information twice, so it only appears when the badge is a bare code.

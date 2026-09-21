@@ -89,6 +89,7 @@ The shared access token lives in `/data/access_token` — deliberately **not** i
 | `image_library` | folder the *Aircraft image* setting reads pictures from (default `/data/liveries`) |
 | `image_api_url` | optional URL template for a picture API — `{icao}`, `{type}` and `{key}` are substituted. Empty = library only |
 | `image_api_key` | the key for that API (stored as a password field in Home Assistant; never in this repository) |
+| `logo_library` | folder your own airline logos are read from, and the folder fetched artwork is cached under (default `/data/logos`). Files match an airline by name or code — see "Airline logos" |
 
 **Per display** (stored in `/data/flight_displays.json`):
 
@@ -107,12 +108,12 @@ The shared access token lives in `/data/access_token` — deliberately **not** i
 | Flight trails, Range rings, Radar sweep, Home-marker ripple | cosmetics |
 | Home-marker ripple | the slow expanding ring at the home marker. It expands with a composited transform, is invisible at both ends of its loop and stays invisible for the first 10% of each cycle, so the restart cannot twitch; turn it off entirely if you prefer a still marker |
 | Centre | `zone.home` or custom coordinates |
-| Accent colour | drives the aircraft glyphs, trails, range rings, compass, the sweep, the home-marker glow **and the dashboard's schematic/arrow/glow** (the nearest aircraft is drawn in a lightened version of it). The airline badge keeps its own per-airline colour, because that one identifies the airline |
+| Accent colour | drives the aircraft glyphs, trails, range rings, compass, the sweep, the home-marker glow **and the dashboard's schematic/arrow/glow** (the nearest aircraft is drawn in a lightened version of it). The airline badge does not use it: a logo, or the code, sits on the same white plate |
 | Text sizes | eight sliders — overhead count, headline, info lines, aircraft callsign, aircraft detail lines, compass & area labels, single-aircraft dashboard, credit line — each 50–300% of the design size, applied per element. The dashboard slider scales its whole layout in one move |
 | **Single-aircraft dashboard** — *This display IS the dashboard* | the display shows nothing but the dashboard, full screen (a standalone dashboard) |
 | **Single-aircraft dashboard** — *Switch to it when only one aircraft is left* | the radar hands over automatically when exactly one aircraft is in the area, and comes back when a second appears |
 | **Single-aircraft dashboard** — *Open it when an aircraft is tapped* | a tap opens the dashboard for **that** aircraft instead of the bottom detail strip; a tap on the dashboard returns to the radar. If the tapped aircraft leaves the area, the radar comes back |
-| **Airline logo** | *The airline's own logo* — the **app** fetches it once per airline (the kiosk never does), keeps it under `/data/logos` and embeds it in the page; *Monogram badge* — the airline's code on a coloured square, nothing fetched at all |
+| **Airline logo** | *The airline's own logo* — **your own file** if the logo folder has one, else the **app** fetches it once per airline (the kiosk never does), keeps it under `/data/logos/.fetched` and embeds it in the page; *Code badge* — the airline's code on the same white plate, nothing fetched at all |
 | **Aircraft type graphic** | *Top-down* — the familiar plan view (37 silhouettes, per family); *Side view* — a profile of the type (9 profiles, per class: twin-jet, widebody, four-engine, regional, business jet, turboprop, light, helicopter, glider). Both sets are local; see "Aircraft icons and the type schematic" |
 | **Aircraft image** | *Drawn silhouette* (default) — nothing fetched, ever; *Real picture* — a picture of **this airline on this aircraft type**, looked up in the image library and/or a keyed API configured in the app options, with the silhouette as the fallback. See "Aircraft pictures" |
 
@@ -124,10 +125,11 @@ the sky fills up again.
 
 One aircraft, the whole screen, refreshed on the same interval as the radar:
 
-* **the airline** — its own **logo** on a light plate when the display's *Airline logo* setting is
-  on, and then nothing else: the logo already says who the airline is, so the name only appears when
-  the badge is a bare code (setting off, logo not fetched yet, or the airline has no logo file). See
-  "Airline logos" below;
+* **the airline** — your own **logo** file for it if the logo folder has one, else the airline's own
+  **logo** fetched by the app, on a white plate — and then nothing else: the logo already says who
+  the airline is, so the name only appears when the badge is a bare code (setting off, logo not
+  fetched yet, or the airline has no logo file). The code badge sits on the *same* white plate, so
+  the badge never changes colour as a logo arrives. See "Airline logos" below;
 * **the flight number** (`flight_number`, falling back to the callsign);
 * **a top-down schematic of the aircraft type** (below), or a **side profile** if the display is set
   that way — the same slot, sized for the drawing it is holding;
@@ -178,10 +180,12 @@ needs nothing but this app:
 * the aircraft **schematics** are vendored artwork, inlined into the page as JSON by the app
   (`web/aircraft_icons.json`) rather than linked as `<img src>` — so the same page also renders
   correctly from the admin's `srcdoc` preview, which has no base URL to fetch from.
-* the airline is a **monogram badge**, coloured from the airline's own code: a real logo would be
-  one more third-party fetch (and a trademark question) for a display that needs neither. (v0.2.1
-  added the real logo as an option — see "Airline logos": the *app* fetches it once, the kiosk
-  still fetches nothing, and the monogram stays as the fallback and the off-switch.)
+* the airline is a **code badge on a white plate**: a real logo would be one more third-party fetch
+  (and a trademark question) for a display that needs neither. (v0.2.1 added the real logo as an
+  option — see "Airline logos": the *app* fetches it once, the kiosk still fetches nothing, and the
+  code badge stays as the fallback and the off-switch. v0.4.2 gives the code badge the same white
+  plate the logo uses — it used to take a colour hashed from the airline's code — and lets a file in
+  the logo folder replace any airline's artwork.)
 
 What the app does **not** do: it does not read live flight data from Flightradar24 (only the
 Supervisor API — the integration owns that session), and it cannot widen what the sensor reports.
@@ -329,10 +333,33 @@ and work. This app is for a personal, non-commercial display.
 
 ## Airline logos
 
-The dashboard's *Airline logo* setting (on by default) shows the airline's own logo. It comes from
-Flightradar24's operator logo set, which is keyed on the airline's **ICAO** code — `EIN_logo0.png`
-exists, `EI_logo0.png` does not — so the lookup key and the two-letter badge code are different
-fields (`airline_icao` vs `airline_iata`).
+The dashboard's *Airline logo* setting (on by default) shows the airline's own logo: **your own file
+if there is one**, otherwise Flightradar24's operator logo set, which is keyed on the airline's
+**ICAO** code — `EIN_logo0.png` exists, `EI_logo0.png` does not — so the lookup key and the
+two-letter badge code are different fields (`airline_icao` vs `airline_iata`).
+
+### Your own logos
+
+Every logo on the display sits on the same white plate, so a file dropped in the logo folder
+(`logo_library`, default `/data/logos`) is all it takes to fix or replace one:
+
+* **named after the airline or its code.** `Aer Lingus.png`, `aer-lingus.jpg`, `EIN.png`, `EI.png`
+  all answer for Aer Lingus: names are compared with everything but letters and digits removed, so
+  case, spaces, punctuation and the extension do not matter. A file whose name *starts with* the
+  airline's name answers for it too (`Ryanair Holdings.png` for the sensor's `Ryanair`) — never for a
+  two- or three-letter code, or `EIN.png` would answer for every airline beginning "E…".
+* **it always wins.** A file beats the artwork the app would have fetched *and* beats the code badge
+  an airline with no published mark would otherwise show. Delete the file to fall back.
+* **`index.json` covers the rest** — `{"EIN": "aer-lingus-2019.png"}` maps a key to any filename,
+  for a personal collection or an export that cannot be renamed.
+* **add them from the admin page** (*Airline logos*): pick or type an airline — the panel lists the
+  airlines flying over right now and where each one's logo comes from — choose an image and save.
+  Uploads are written into the same folder, so they survive upgrades and travel with a backup. The
+  panel also lists what is in the folder (with a thumbnail) and can delete a file.
+* **your files are shown exactly as you saved them.** Only fetched artwork is tidied (below).
+  PNG, JPEG, WebP or SVG, up to 400 KB.
+
+### Fetched artwork
 
 This is the app's only outbound request, and it is built so that it can never cost you a display:
 
@@ -342,8 +369,9 @@ This is the app's only outbound request, and it is built so that it can never co
 * **nothing waits for the network.** A poll answers with whatever is cached and asks a background
   thread for the rest, so a slow or dead CDN costs the **code badge for a few seconds**, never a
   stalled display. The logo appears on a following poll.
-* **the artwork is kept forever, in `/data/logos/<ICAO>.png`.** One download per airline, ever;
-  the cache survives restarts and upgrades, and is served from disk after that.
+* **the artwork is kept forever, in `/data/logos/.fetched/<ICAO>.png`.** One download per airline,
+  ever; the cache survives restarts and upgrades, and is served from disk after that. It lives in a
+  sub-folder so that everything directly in the logo folder is unambiguously yours.
 * **only airlines this display shows are fetched** — never the sensor's whole area (this sensor
   reports 281 aircraft and some 65 airlines; a 6-aircraft display asks for at most 6).
 * **failures are remembered.** A miss is not retried for an hour, and after three network failures
@@ -352,15 +380,27 @@ This is the app's only outbound request, and it is built so that it can never co
 * **a 404 is not a failure.** Airlines without a logo file (14 of this sensor's 65) simply keep the
   code badge; that is not counted as the internet being down.
 
-Turn it off per display with *Airline logo → Monogram badge* if you would rather this app never
-touched the internet at all; the payload then carries no logo bytes whatsoever.
+Turn it off per display with *Airline logo → Code badge* if you would rather this app never touched
+the internet at all; the payload then carries no logo bytes whatsoever.
 
-**Why the light plate:** the logos are the airlines' own wordmarks, and several of them (British
-Airways, American, Air France) are dark navy — on a night-sky background they would be nearly
-invisible. They sit on a soft off-white plate, which is also what the coloured code badge became, so
-the two fallbacks are visually the same object. Because the logo *is* the airline's identity, the
-name beside it is hidden while a logo is shown — it comes back automatically when the badge is only
-a code.
+### The white plate, and the plate inside the artwork
+
+**The plate:** the logos are the airlines' own wordmarks, and several of them (British Airways,
+American, Air France) are dark navy — on a night-sky background they would be nearly invisible. They
+sit on a soft off-white plate, and the code badge uses the **same** plate: the badge used to take a
+colour hashed from the airline's code, and a badge already drawn in that colour kept it when the logo
+arrived on a later poll, so a logo could land on a purple or cyan rectangle. Nothing sets a badge
+colour inline any more. Because the logo *is* the airline's identity, the name beside it is hidden
+while a logo is shown — it comes back automatically when the badge is only a code.
+
+**The plate inside the artwork:** a few airlines publish their mark as artwork that carries its own
+backing — Thomson/TUI and Jetairfly as a pale blue-violet box, Norwegian as a red one — and that box
+reads as a coloured rectangle around a logo that has no purple in it. Fetched PNG artwork is
+therefore decoded (with `zlib` and the PNG spec; no image library on an i386 box) and a solid backing
+plate is repainted white. Two things are deliberately left alone: transparent artwork, and artwork
+whose mark is lighter than its plate (Norwegian's white wordmark, Jetairfly's pale "fly" — whitening
+those would erase them, so those keep their plate). Anything the reader cannot decode is passed
+through unchanged, so the only failure mode is "the plate stays".
 
 **Trademark note:** these are the airlines' own marks, published by Flightradar24 alongside its
 data, used here for a personal non-commercial display (the radar view credits Flightradar24 in its
@@ -383,9 +423,11 @@ footer). If you ever republish this app for others, that is the part to re-check
 | A drone or balloon still shows a plan view in side-view mode | deliberate: there is no profile for them, so the plan view is kept rather than showing a wrong profile |
 | Tapping an aircraft opens a different one's dashboard | the tap landed on a label that overlaps the glyph; the label is what is on top, so it is what opens |
 | The dashboard is on screen for the wrong aircraft | it shows the **closest** aircraft unless it was opened by a tap; a tapped aircraft is followed until it leaves the area |
-| No airline logo, just the code badge | three normal cases: the logo has not been fetched yet (it appears on a later poll), the airline has no logo file at Flightradar24 (14 of the 65 airlines this sensor sees), or the display is set to *Monogram badge*. A *Home Assistant with no internet* logs `airline logos unreachable` once and then stops trying for 30 minutes |
+| No airline logo, just the code badge | four normal cases: the logo has not been fetched yet (it appears on a later poll), the airline has no logo file at Flightradar24 (14 of the 65 airlines this sensor sees), the display is set to *Code badge*, or nothing in your logo folder matches. A *Home Assistant with no internet* logs `airline logos unreachable` once and then stops trying for 30 minutes |
+| A logo sits on a coloured rectangle | it is the artwork's own backing plate, not the badge. Most are repainted white when fetched; the few whose mark is lighter than the plate (Norwegian's white wordmark) keep it, because whitening would erase them. Drop your own file in the logo folder to override that airline completely |
+| My logo file is not being used | it must be named after the airline (`Aer Lingus.png`) or its code (`EIN.png`) — letters and digits only are compared, so `aer-lingus.jpg` works too. Check the admin page's *Airline logos* panel: it lists the airlines overhead and where each logo comes from, and any file it is not using says so (including when two files reduce to the same name — the last one in the listing wins) |
 | The logo is a broken image | it cannot be: the page is given a `data:` URI and falls back to the code badge when there is none. If you see a broken icon, the payload is being rewritten by something in front of the app |
-| Fetching logos is not wanted at all | set *Airline logo → Monogram badge* on each display; the app then makes no outbound request for that display (and sends no logo bytes) |
+| Fetching logos is not wanted at all | set *Airline logo → Code badge* on each display; the app then makes no outbound request for that display (and sends no logo bytes) |
 | No aircraft picture, just the silhouette | normal: nothing configured (`image_api_url` empty and the library empty), nothing found for this airline+type, or the fetch failed. With *Real picture* set, the app asks for `<ICAO>_<TYPE>` — check the library has that exact name, or that the `index.json` maps it |
 | Pictures are the wrong airline or type | whatever is in the library wins over what is "right": the app matches on the file name (`EIN_A21N`) and does not inspect the image. Remove or rename the file to fix it |
 | A picture API returns nothing | check `image_api_url`'s placeholders (`{icao}`, `{type}`, `{key}`), that the key is set, and the log line `aircraft images unreachable` — after three network errors the fetcher stands down for half an hour by design |

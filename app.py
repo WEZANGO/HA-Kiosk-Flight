@@ -8,11 +8,15 @@ SDK, no external API, no key on the device.
 
 The single exception is the airline logo artwork on the single-aircraft dashboard:
 that one is fetched by THIS app (never by the kiosk), once per airline, cached
-under /data, and can be switched off per display ("Airline logo: monogram badge").
-See the logo section below for the rules it follows.
+under /data, and can be switched off per display ("Airline logo: code badge").
+Your own file for an airline, dropped in the logo folder (or added on the admin
+page), wins over the fetched one — and any solid backing plate in fetched artwork
+is repainted white. See the logo sections below for the rules they follow.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import math
 import os
@@ -20,11 +24,11 @@ import re
 import secrets
 import threading
 import time
-import base64
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
 # Module constants: a local test harness rebinds these before serving (see DOCS.md).
@@ -48,6 +52,11 @@ OPTION_DEFAULTS = {
     "image_library": "/data/liveries",
     "image_api_url": "",          # e.g. https://…/livery?icao={icao}&type={type}&key={key}
     "image_api_key": "",
+    # Your own airline logos. Any image file in here answers for the airline whose
+    # name it carries ("Aer Lingus.png") or whose code it carries ("EIN.png"), and
+    # wins over the artwork the app would have fetched. Fetched artwork lives in a
+    # `.fetched` sub-folder, so what is in this folder is always yours.
+    "logo_library": "/data/logos",
 }
 
 # Every display setting. Booleans travel FormData -> JSON -> injected JS as the
@@ -79,9 +88,10 @@ DEFAULTS = {
     "detailAlways": "false",
     "detailAuto": "false",
     "detailClick": "false",
-    # What the airline part of the dashboard shows: the real logo (fetched once,
-    # by the app, on the machine that runs it — never by the kiosk — and kept on
-    # disk) or the monogram badge, which needs nothing but the code.
+    # What the airline part of the dashboard shows: the real logo (your own file
+    # for the airline if there is one, else fetched once by the app on the machine
+    # that runs it — never by the kiosk — and kept on disk) or the code badge,
+    # which needs nothing but the code.
     "airlineLogo": "image",
     # How the aircraft type is drawn: "top" (the familiar plan view) or "side"
     # (a profile). Both sets are vendored and inlined; see the icon section.
@@ -568,8 +578,8 @@ def side_view_icon(icon: str) -> str:
 #
 # Trademark note: these are the airlines' own marks as published by Flightradar24
 # alongside its data. This is a personal, non-commercial display that credits
-# Flightradar24 in its footer; "Airline logo: monogram badge" turns it off
-# entirely, per display.
+# Flightradar24 in its footer; "Airline logo: code badge" turns it off entirely,
+# per display, and a logo of your own replaces any single airline's.
 # --------------------------------------------------------------------------- #
 LOGO_BASE_URL = "https://www.flightradar24.com/static/images/data/operators/{icao}_logo0.png"
 LOGO_USER_AGENT = "Mozilla/5.0 (compatible; KioskFlightDisplays/1.0)"
@@ -762,38 +772,357 @@ def is_artwork(data: bytes) -> bool:
     return bool(guess_mime(data))
 
 
-# Airline logos: Flightradar24's operator set, keyed on the ICAO code.
+# Airline logos the app fetches for you: Flightradar24's operator set, keyed on
+# the ICAO code, kept in a `.fetched` sub-folder of the logo folder so that the
+# folder itself is only ever the user's own artwork.
 LOGO_CACHE = AssetCache(
     "airline logos",
-    directory=lambda: DATA_FILE.parent / "logos",
+    directory=lambda: logo_directory() / ".fetched",
     url_for=lambda key: LOGO_BASE_URL.format(icao=key),
     headers=lambda: {"User-Agent": LOGO_USER_AGENT},
     accepts=is_png, timeout=LOGO_TIMEOUT, max_bytes=LOGO_MAX_BYTES,
     retry_after=LOGO_RETRY_AFTER, offline_after=LOGO_OFFLINE_AFTER,
     failures_before_offline=LOGO_FAILURES_BEFORE_OFFLINE,
     max_parallel=LOGO_MAX_PARALLEL, key_pattern=r"[A-Z0-9]{2,4}",
-    hint=" (the monogram badge is shown)")
+    hint=" (the airline's code is shown)")
 
 
 def logo_enabled(config: dict) -> bool:
     return str(config.get("airlineLogo", DEFAULTS["airlineLogo"])) != "monogram"
 
 
-def logo_data(icao: str):
-    """Cached logo bytes for an airline, starting a background fetch if missing.
+# --------------------------------------------------------------------------- #
+# Your own logos
+#
+# A folder of image files, each answering for the airline whose name it carries
+# ("Aer Lingus.png") or whose code it carries ("EIN.png") — no renaming to the
+# app's conventions, no per-airline setting. Matching reduces both sides to
+# letters and digits (logo_slug), so case, spaces, dots and the extension are
+# all free, and an airline whose published mark is wrong, dated or missing gets
+# replaced by dropping a file in:
+#
+#   * a file in the folder beats anything the app would have fetched, and beats
+#     the code badge an airline with no published mark would otherwise show;
+#   * `index.json` still covers what a filename cannot say twice —
+#     {"EIN": "aer-lingus-2019.png"} — and the app writes one for logos added
+#     through the admin page;
+#   * the app's own fetched artwork lives in a `.fetched` sub-folder, so nothing
+#     in this index is ever anything but the user's;
+#   * the index is re-read every few seconds, so a file dropped in over Samba or
+#     through the File editor shows up without restarting the app.
+# --------------------------------------------------------------------------- #
+LOGO_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".svg")
+LOGO_INDEX_SECONDS = 5.0
+LOGO_UPLOAD_MAX = LOGO_MAX_BYTES      # the same ceiling the fetcher enforces
+_logo_index = {"at": 0.0, "files": {}}
 
-    Returns None the first time an airline is seen: the caller renders the code
-    badge, and the logo appears on a later poll — nothing here ever waits for the
-    network.
+
+def logo_directory() -> Path:
+    """The folder the user's own logos are read from."""
+    configured = as_text(option("logo_library"), 200)
+    return Path(configured) if configured else DATA_FILE.parent / "logos"
+
+
+def logo_slug(value) -> str:
+    """A name or code reduced to what two spellings of an airline agree on."""
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def logo_library() -> dict:
+    """{slug: Path} for the files in the logo folder, re-read every few seconds."""
+    now = time.time()
+    if now - _logo_index["at"] < LOGO_INDEX_SECONDS:
+        return _logo_index["files"]
+    found = {}
+    try:
+        # Same order as logo_files(): where two names reduce to one key, the last
+        # one wins, and the panel must report the same winner the lookup uses.
+        entries = sorted(logo_directory().iterdir(), key=lambda path: path.name.lower())
+    except OSError:
+        entries = []                  # no folder yet: the fetcher will make one
+    for path in entries:
+        if path.is_file() and path.suffix.lower() in LOGO_EXTENSIONS:
+            found[logo_slug(path.stem)] = path
+    try:
+        named = json.loads((logo_directory() / "index.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        named = {}
+    if isinstance(named, dict):
+        for key, name in named.items():
+            path = logo_directory() / str(name)
+            if path.is_file() and path.suffix.lower() in LOGO_EXTENSIONS:
+                found.setdefault(logo_slug(key), path)
+    _logo_index["at"] = now
+    _logo_index["files"] = found
+    return found
+
+
+def logo_names(row: dict) -> list:
+    """Every key one airline could be filed under, best first.
+
+    The codes are exact matches; the name is whatever the sensor calls it, plus
+    its first word, so a file called "Ryanair.png" answers for the row the sensor
+    names "Ryanair Holdings" and vice versa (see the prefix rule in logo_file).
     """
-    return LOGO_CACHE.get(icao)
+    keys = []
+    for value in (row.get("airlineIcao"), row.get("airlineCode"), row.get("airline")):
+        slug = logo_slug(value)
+        if slug and slug not in keys:
+            keys.append(slug)
+    first = logo_slug(str(row.get("airline") or "").split(" ")[0])
+    if len(first) >= 4 and first not in keys:
+        keys.append(first)
+    return keys
 
 
-def logo_data_uri(icao: str) -> str:
-    data = logo_data(icao)
+def logo_file(row: dict):
+    """The user's own file for an airline, or None to fall through to a fetch."""
+    library = logo_library()
+    keys = logo_names(row)
+    for key in keys:                  # exact first: a code, or the name itself
+        if key in library:
+            return library[key]
+    for key in keys:                  # then a name that starts the filename's
+        if len(key) < 4:              # never a 2-3 letter code, or EIN.png would
+            continue                  # answer for every airline starting "E…"
+        for slug, path in library.items():
+            if slug.startswith(key) or (len(slug) >= 4 and key.startswith(slug)):
+                return path
+    return None
+
+
+def logo_bytes(row: dict):
+    """Artwork for one airline: the user's file, else the app's fetched copy.
+
+    None until a fetch has finished — which is what leaves the badge showing the
+    airline's code for the first poll or two of an airline it has never seen.
+    """
+    path = logo_file(row)
+    if path:
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return None
+        return data if is_artwork(data) else None
+    data = LOGO_CACHE.get(as_text(row.get("airlineIcao"), 4))
+    return logo_art(data) if data else None
+
+
+def logo_data_uri(row: dict) -> str:
+    data = logo_bytes(row)
     if not data:
         return ""
-    return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+    mime = guess_mime(data) or "image/png"
+    return "data:" + mime + ";base64," + base64.b64encode(data).decode("ascii")
+
+
+# --------------------------------------------------------------------------- #
+# The plate behind a logo
+#
+# A handful of airlines publish their mark as artwork that carries its own
+# backing: Thomson/TUI and Jetairfly as a pale blue-violet box, Norwegian as a
+# red one. On the dashboard's white badge that box reads as a purple rectangle
+# around a logo that has no purple in it, so a fetched plate is repainted white:
+#
+#   * transparency is left alone — it already lets the white badge through;
+#   * a plate the mark NEEDS is left alone: Norwegian's wordmark is white, and
+#     white on white is nothing, so artwork whose ink sits lighter than its plate
+#     keeps both;
+#   * only PNG is touched (everything the fetcher accepts is), and only with
+#     zlib and the PNG spec — no image library on a box that may be an i386.
+#     Anything this reader cannot decode is passed through unchanged, so the one
+#     failure mode is "the plate stays".
+#   * your own files are never touched: art supplied by hand is shown as supplied.
+# --------------------------------------------------------------------------- #
+PLATE_TOLERANCE = 30          # per-channel distance that still reads as the plate
+PLATE_BORDER_SHARE = 0.6      # border pixels that must be plate to call it one
+PLATE_WHITE_FROM = 245        # a plate this light is already the badge's colour
+PLATE_LIGHT_INK = 0.62        # a mark this light cannot show against white
+PLATE_LIGHT_SHARE = 0.05      # ... and this much of it means the plate is wanted
+_plate_cache: dict = {}
+
+
+def _png_rgba(data: bytes):
+    """(width, height, RGBA8 bytes) for a plain 8-bit PNG, or None.
+
+    Deliberately not a PNG implementation: no interlacing, no sub-byte samples,
+    no 16-bit — all of which the artwork this app reads has, and none of which is
+    worth the code on a device that only ever needs to look at 150×40 pixels.
+    """
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    pos, header, idat, palette, transparency = 8, None, bytearray(), None, None
+    while pos + 8 <= len(data):
+        length = int.from_bytes(data[pos:pos + 4], "big")
+        kind = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + length]
+        if len(body) != length:
+            return None                       # truncated chunk: not ours to guess
+        if kind == b"IHDR":
+            header = body
+        elif kind == b"PLTE":
+            palette = body
+        elif kind == b"tRNS":
+            transparency = body
+        elif kind == b"IDAT":
+            idat += body
+        elif kind == b"IEND":
+            break
+        pos += 12 + length
+    if not header or len(header) < 13:
+        return None
+    width = int.from_bytes(header[0:4], "big")
+    height = int.from_bytes(header[4:8], "big")
+    depth, colour, method, filtering, interlace = header[8], header[9], header[10], header[11], header[12]
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(colour)
+    if channels is None or depth != 8 or interlace or method or filtering:
+        return None
+    if width < 1 or height < 1 or width * height > 4_000_000:
+        return None
+    if colour == 3 and (not palette or len(palette) % 3):
+        return None
+    try:
+        raw = zlib.decompress(bytes(idat))
+    except zlib.error:
+        return None
+    stride = width * channels
+    if len(raw) != (stride + 1) * height:
+        return None
+    out = bytearray(width * height * 4)
+    previous = bytes(stride)
+    for y in range(height):
+        start = y * (stride + 1)
+        kind = raw[start]
+        line = bytearray(raw[start + 1:start + 1 + stride])
+        if kind == 1:
+            for i in range(channels, stride):
+                line[i] = (line[i] + line[i - channels]) & 0xFF
+        elif kind == 2:
+            for i in range(stride):
+                line[i] = (line[i] + previous[i]) & 0xFF
+        elif kind == 3:
+            for i in range(stride):
+                left = line[i - channels] if i >= channels else 0
+                line[i] = (line[i] + ((left + previous[i]) >> 1)) & 0xFF
+        elif kind == 4:
+            for i in range(stride):
+                left = line[i - channels] if i >= channels else 0
+                up = previous[i]
+                corner = previous[i - channels] if i >= channels else 0
+                guess = left + up - corner
+                da, db, dc = abs(guess - left), abs(guess - up), abs(guess - corner)
+                nearest = left if (da <= db and da <= dc) else (up if db <= dc else corner)
+                line[i] = (line[i] + nearest) & 0xFF
+        elif kind != 0:
+            return None
+        previous = bytes(line)
+        at = y * width * 4
+        if colour == 6:
+            out[at:at + stride] = line
+        elif colour == 2:
+            for x in range(width):
+                out[at + x * 4:at + x * 4 + 3] = line[x * 3:x * 3 + 3]
+                out[at + x * 4 + 3] = 255
+        elif colour == 0:
+            for x in range(width):
+                grey = line[x]
+                out[at + x * 4:at + x * 4 + 3] = bytes([grey, grey, grey])
+                out[at + x * 4 + 3] = 255
+        elif colour == 4:
+            for x in range(width):
+                grey = line[x * 2]
+                out[at + x * 4:at + x * 4 + 3] = bytes([grey, grey, grey])
+                out[at + x * 4 + 3] = line[x * 2 + 1]
+        else:
+            table, alpha = palette or b"", transparency or b""
+            for x in range(width):
+                index = line[x]
+                if (index + 1) * 3 > len(table):
+                    continue                              # index outside the palette
+                out[at + x * 4:at + x * 4 + 3] = table[index * 3:index * 3 + 3]
+                out[at + x * 4 + 3] = alpha[index] if index < len(alpha) else 255
+    return width, height, out
+
+
+def _png_write(width: int, height: int, rgba: bytes) -> bytes:
+    """A PNG (8-bit RGBA, filter 0) — the plate change is written back as-is."""
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)
+        raw += rgba[y * width * 4:(y + 1) * width * 4]
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (len(body).to_bytes(4, "big") + kind + body
+                + zlib.crc32(kind + body).to_bytes(4, "big"))
+
+    head = width.to_bytes(4, "big") + height.to_bytes(4, "big") + bytes([8, 6, 0, 0, 0])
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head)
+            + chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + chunk(b"IEND", b""))
+
+
+def white_plate_png(data: bytes):
+    """`data` with a solid backing plate repainted white, or None if left alone."""
+    decoded = _png_rgba(data)
+    if not decoded:
+        return None
+    width, height, rgba = decoded
+    border = ([(x, 0) for x in range(width)] + [(x, height - 1) for x in range(width)]
+              + [(0, y) for y in range(height)] + [(width - 1, y) for y in range(height)])
+    tally: dict = {}
+    opaque = 0
+    for x, y in border:
+        at = (y * width + x) * 4
+        pixel = bytes(rgba[at:at + 4])
+        if pixel[3] < 200:
+            continue
+        opaque += 1
+        tally[pixel] = tally.get(pixel, 0) + 1
+    if opaque < 0.9 * len(border):
+        return None                   # transparent artwork: the badge shows through
+    plate = max(tally, key=lambda pixel: tally[pixel])
+    # Nearly, not exactly, the plate: a rounded corner or a one-pixel jpeg-style
+    # edge gives the same backing a dozen neighbouring values.
+    same = 0
+    for x, y in border:
+        at = (y * width + x) * 4
+        if max(abs(rgba[at + i] - plate[i]) for i in range(3)) <= PLATE_TOLERANCE:
+            same += 1
+    if same < PLATE_BORDER_SHARE * len(border):
+        return None                   # a busy edge is artwork, not a backing
+    if min(plate[:3]) >= PLATE_WHITE_FROM:
+        return None                   # already the colour of the badge
+    ink, light = 0, 0
+    for at in range(0, width * height * 4, 4):
+        pixel = rgba[at:at + 4]
+        if max(abs(pixel[i] - plate[i]) for i in range(3)) <= PLATE_TOLERANCE:
+            rgba[at:at + 4] = b"\xff\xff\xff\xff"
+            continue
+        ink += 1
+        if (0.299 * pixel[0] + 0.587 * pixel[1] + 0.114 * pixel[2]) / 255.0 > PLATE_LIGHT_INK:
+            light += 1
+    if not ink:
+        return None
+    # A mark this light over more than a sliver of itself cannot survive a white
+    # badge: Norwegian's wordmark is white and Jetairfly's "fly" is pale blue, and
+    # both are legible only because of the plate behind them. Antialiased edges
+    # against the plate are light too, but they are a fringe, not a fifth of the
+    # mark. Checked as a share of the whole image so a thin sublogo (a 2-pixel
+    # "fly" in 2800 pixels) still counts.
+    if light > PLATE_LIGHT_SHARE * width * height:
+        return None
+    return _png_write(width, height, bytes(rgba))
+
+
+def logo_art(data: bytes) -> bytes:
+    """white_plate_png() behind a small memory cache: the artwork is fetched once,
+    but every poll rebuilds the payload it goes into."""
+    key = hashlib.sha1(data).hexdigest()
+    if key not in _plate_cache:
+        if len(_plate_cache) > 64:
+            _plate_cache.clear()
+        _plate_cache[key] = white_plate_png(data) or data
+    return _plate_cache[key]
+
 
 
 # --------------------------------------------------------------------------- #
@@ -906,7 +1235,11 @@ def aircraft_images(flights: list, config: dict) -> dict:
 
 
 def airline_logos(flights: list, config: dict) -> dict:
-    """Data URIs for the airlines a payload shows, keyed by ICAO code.
+    """Data URIs for the airlines a payload shows, keyed by the airline's own key.
+
+    The key is the ICAO code, or — for a flight the sensor has no code for — the
+    slug of its name; the page's logoKey() builds the same key, so a logo can be
+    answered by a file named after the airline alone.
 
     Deduplicated and sent once per airline rather than once per aircraft: a
     dozen arrivals from one airline should not carry the same 8 KB of PNG twelve
@@ -915,15 +1248,15 @@ def airline_logos(flights: list, config: dict) -> dict:
     if not logo_enabled(config):
         return {}
     logos = {}
-    seen = set()
+    tried = set()
     for row in flights:
-        icao = row.get("airlineIcao") or ""
-        if not icao or icao in seen:
+        key = as_text(row.get("airlineIcao"), 4).upper() or logo_slug(row.get("airline"))
+        if not key or key in tried:
             continue
-        seen.add(icao)
-        uri = logo_data_uri(icao)
+        tried.add(key)
+        uri = logo_data_uri(row)
         if uri:
-            logos[icao] = uri
+            logos[key] = uri
     return logos
 
 
@@ -1027,7 +1360,7 @@ def flight_rows(config: dict) -> dict:
             "flight": as_text(flight.get("flight_number"), 20),
             "registration": as_text(flight.get("aircraft_registration"), 20),
             "airline": as_text(flight.get("airline_short") or flight.get("airline"), 40),
-            # The monogram badge in the single-aircraft view is the airline's own
+            # The code badge in the single-aircraft view is the airline's own
             # code — IATA when the sensor has it (two letters, what is painted on
             # the tail), else ICAO. It is a code, not a name, so it is kept apart
             # from `airline`.
@@ -1270,6 +1603,144 @@ def render_display(display: dict, data: dict = None) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# The logo folder, seen from the admin page
+#
+# List it, save an upload into it, delete a file from it — plus, for every
+# airline the sensor is reporting right now, where its logo would come from.
+# Uploads arrive as base64 inside JSON rather than as multipart: the admin page
+# posts JSON everywhere else, and a filename that came from a browser is the one
+# thing this app must never take on trust.
+# --------------------------------------------------------------------------- #
+def logo_thumb(path, size: int) -> str:
+    """A data URI for the panel's preview — only for artwork small enough that
+    sending it to the admin page costs nothing (the ones that are 300 KB are
+    the ones the display itself would downsample anyway)."""
+    if size > 60_000:
+        return ""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    mime = guess_mime(data)
+    if not mime:
+        return ""
+    return "data:" + mime + ";base64," + base64.b64encode(data).decode("ascii")
+
+
+def logo_files() -> list:
+    """Every file in the logo folder, in sort order.
+
+    Deliberately not logo_library(): that is keyed BY KEY, so two files whose
+    names reduce to the same slug ("Aer Lingus.png" and "aerlingus.png") collapse
+    into one entry and the loser would be invisible — impossible to delete from
+    the panel while sitting in the folder.
+    """
+    try:
+        entries = sorted(logo_directory().iterdir(), key=lambda path: path.name.lower())
+    except OSError:
+        return []
+    return [path for path in entries
+            if path.is_file() and path.suffix.lower() in LOGO_EXTENSIONS]
+
+
+def logo_report() -> dict:
+    """{directory, files, airlines, error} for the admin page's logo panel.
+
+    The airline list is the app's DEFAULT display config — the option's sensor and
+    the default number of aircraft — not any one display's, so a logo can be added
+    for an airline the panel is showing even when no display happens to show it.
+    Asking here also warms the fetch cache for those airlines.
+    """
+    payload = flight_rows(build_config({}))
+    sources, order = {}, []
+    for row in payload.get("flights") or []:
+        name = as_text(row.get("airline"), 40) or as_text(row.get("airlineCode"), 8)
+        if not name or name in sources:
+            continue
+        path = logo_file(row)
+        if path:
+            source, detail = "yours", path.name
+        elif logo_bytes(row):
+            source, detail = "fetched", ""
+        else:
+            source, detail = "code", ""
+        sources[name] = source
+        order.append({"name": name, "code": as_text(row.get("airlineCode"), 8),
+                      "source": source, "file": detail})
+    used = {}
+    for entry in order:
+        if entry["file"]:
+            used.setdefault(entry["file"], []).append(entry["name"])
+    library = logo_library()
+    files = []
+    for path in logo_files():
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        key = logo_slug(path.stem)
+        files.append({"file": path.name, "key": key, "bytes": size,
+                      "active": library.get(key) == path,
+                      "airlines": sorted(used.get(path.name, [])),
+                      "thumb": logo_thumb(path, size)})
+    return {"directory": str(logo_directory()), "files": files, "airlines": order,
+            "fetched": sum(1 for entry in order if entry["source"] == "fetched"),
+            "sensor": as_text(payload.get("entityId"), 120), "error": payload.get("error", "")}
+
+
+def logo_upload(form: dict) -> dict:
+    """Write one uploaded logo into the folder. Raises ValueError with a reason."""
+    name = as_text(form.get("airline"), 60)
+    code = re.sub(r"[^A-Za-z0-9]", "", as_text(form.get("code"), 8)).upper()
+    if not name and not code:
+        raise ValueError("Give the airline's name, or its code.")
+    encoded = as_text(form.get("data"), 4 * LOGO_UPLOAD_MAX)
+    if not encoded:
+        raise ValueError("Choose an image file first.")
+    body = encoded.split(",", 1)[1] if encoded.startswith("data:") else encoded
+    try:
+        data = base64.b64decode(body, validate=True)
+    except ValueError:
+        raise ValueError("That image could not be read.")
+    mime = guess_mime(data)
+    if not mime or not data:
+        raise ValueError("That file is not a PNG, JPEG, WebP or SVG image.")
+    if len(data) > LOGO_UPLOAD_MAX:
+        raise ValueError(f"That image is {len(data) // 1024} KB; the limit is "
+                         f"{LOGO_UPLOAD_MAX // 1024} KB.")
+    stem = code if code else logo_slug(name)
+    if not re.fullmatch(r"[A-Za-z0-9]{2,24}", stem):
+        raise ValueError("That name has no letters or digits to file it under.")
+    target = logo_directory() / (stem + EXT_BY_MIME.get(mime, ".png"))
+    try:
+        logo_directory().mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + ".tmp")
+        temporary.write_bytes(data)
+        temporary.replace(target)
+    except OSError as error:
+        raise ValueError(f"Could not write to {logo_directory()}: {error}")
+    _logo_index["at"] = 0.0          # the next lookup must see the new file
+    return {"file": target.name, "key": logo_slug(target.stem), "bytes": len(data),
+            "airline": name or code}
+
+
+def logo_delete(name: str) -> dict:
+    """Remove one file from the folder. Raises ValueError with a reason."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._()&'-]{0,79}\.(png|jpg|jpeg|webp|svg)",
+                        name, re.IGNORECASE):
+        raise ValueError("That is not a logo filename.")
+    path = logo_directory() / name
+    if not path.is_file():
+        raise ValueError(f"{name} is not in the logo folder.")
+    try:
+        path.unlink()
+    except OSError as error:
+        raise ValueError(f"Could not delete {name}: {error}")
+    _logo_index["at"] = 0.0
+    return {"deleted": name}
+
+
+# --------------------------------------------------------------------------- #
 # Admin page
 # --------------------------------------------------------------------------- #
 def admin_page() -> str:
@@ -1315,6 +1786,9 @@ button{border:0;background:#38bdf8;color:#082f49;font-weight:700;cursor:pointer}
 .sensor-summary b{color:#f8fafc}
 .sensor-summary.error{color:#fca5a5}
 @media(max-width:620px){form{grid-template-columns:1fr}}
+.logo-row{display:flex;align-items:center;gap:12px}
+.logo-thumb{max-height:34px;max-width:150px;background:rgba(238,245,255,.94);border-radius:5px;padding:3px 5px}
+.logo-row .logo-grow{flex:1;min-width:0}
 </style></head><body>
 <h1>Kiosk Flight Displays</h1>
 <p>Full-screen displays of the aircraft flying over your house. Data comes from the
@@ -1325,6 +1799,31 @@ and is read server-side, so a kiosk on a network with no internet needs nothing 
 <section><h2>New display</h2><button id="new-display">＋ Add a full-screen flight display</button></section>
 <section><h2>Your displays</h2><p class="sensor-summary" id="sensor-summary">Checking the sensor…</p>
 <div id="list">Loading…</div></section>
+<section><h2>Airline logos</h2>
+<p>Each airline's own mark is fetched once by the app and kept, but a file in the folder below always
+wins — which is how an airline with no published logo, or one whose mark you would rather not show,
+gets its own artwork. Name the file after the airline (<code>Aer Lingus.png</code>) or its code
+(<code>EIN.png</code>): case, spaces and the extension are ignored. A logo added here is stored in
+that folder, so it survives updates and travels with a backup.</p>
+<div class="link-line"><span class="link-label">Folder</span>
+  <a class="link-url" id="logo-dir" href="#"></a>
+  <button class="copy" id="logo-dir-copy" title="Copy the path">⧉</button></div>
+<div class="row">
+  <label>Airline or code<input id="logo-name" placeholder="Aer Lingus — or EIN"></label>
+  <label>Image file<input type="file" id="logo-file"
+    accept="image/png,image/jpeg,image/webp,image/svg+xml"></label>
+  <div class="dash-actions"><button id="logo-save">Save logo</button></div>
+  <p class="preview-hint" id="logo-hint"></p>
+  <p class="hint">Two to four letters are taken as the airline's code; anything longer as its name.
+  PNG, JPEG, WebP or SVG, up to 400 KB. The file is named after whichever you gave, so a later
+  upload for the same airline replaces it.</p>
+</div>
+<h3>Flying over now</h3>
+<p class="sensor-summary" id="logo-status">Checking…</p>
+<div id="logo-airlines"></div>
+<h3>In the folder</h3>
+<div id="logo-list">Loading…</div>
+</section>
 <div id="editor-modal" class="modal-overlay" hidden><div class="modal-content">
 <h2 id="modal-title">New display</h2>
 <form id="editor">
@@ -1388,11 +1887,13 @@ aircraft, and it refreshes with the radar.</p>
   and a 737 share a profile; anything with no profile (a drone, a balloon) keeps its plan view.</span></label>
 <label>Airline logo<select name="airlineLogo">
   <option value="image">The airline's own logo</option>
-  <option value="monogram">Monogram badge — its code, nothing fetched</option></select>
+  <option value="monogram">Code badge — its code, nothing fetched</option></select>
   <span class="hint">The logo is the one thing here that comes from the internet: the
   <em>app</em> fetches it once per airline and keeps it under <code>/data</code>, so it still shows on a
-  kiosk with no internet. Until it has arrived — and on a Home Assistant with no internet at all — the
-  badge falls back to the airline's code.</span></label>
+  kiosk with no internet. A file of your own in the logo folder (see
+  <strong>Airline logos</strong> below) always wins over the fetched one. Until a logo has arrived —
+  and on a Home Assistant with no internet at all — the badge shows the airline's code, on the same
+  white plate the logo sits on.</span></label>
 <p class="hint wide">Left unticked, the display is the radar exactly as before. The three are
 independent: a standalone dashboard can also be one whose radar comes back when the sky fills up.</p>
 <h3>Where it is centred</h3>
@@ -1610,7 +2111,91 @@ document.querySelector('#new-display').onclick=async function(){openModal(null);
 centreEl.addEventListener('change',function(){
   var custom=centreEl.value==='custom';
   f.elements['latitude'].disabled=!custom;f.elements['longitude'].disabled=!custom});
-loadSensors();load();
+// --- airline logos -------------------------------------------------------- //
+var logoNameEl=document.querySelector('#logo-name'),logoFileEl=document.querySelector('#logo-file'),
+    logoHintEl=document.querySelector('#logo-hint'),logoListEl=document.querySelector('#logo-list'),
+    logoAirEl=document.querySelector('#logo-airlines'),logoStatusEl=document.querySelector('#logo-status'),
+    logoDirEl=document.querySelector('#logo-dir');
+function esc(value){return String(value==null?'':value).replace(/[&<>"']/g,function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+function kbytes(n){return n>=1024?Math.round(n/1024)+' KB':n+' B'}
+function logoSource(a){
+  if(a.source==='yours')return '<b>your logo</b> — '+esc(a.file);
+  if(a.source==='fetched')return 'fetched from Flightradar24';
+  return 'nothing yet — the code badge is shown'}
+function logoNote(f){
+  if(!f.active)return 'not used: another file answers for <code>'+esc(f.key)+'</code>';
+  if(f.airlines.length)return 'answers for '+esc(f.airlines.join(', '));
+  return 'not used by an aircraft overhead right now — key '+esc(f.key)}
+async function loadLogos(){
+  var data;
+  try{data=await request('/api/logos')}
+  catch(e){logoStatusEl.className='sensor-summary error';
+    logoStatusEl.textContent='Could not read the logo folder: '+e.message;return}
+  logoDirEl.textContent=data.directory;
+  document.querySelector('#logo-dir-copy').dataset.copy=data.directory;
+  if(data.error){logoStatusEl.className='sensor-summary error';logoStatusEl.textContent=data.error}
+  else{logoStatusEl.className='sensor-summary';
+    logoStatusEl.textContent=(data.airlines.length?data.airlines.length+' airline'
+      +(data.airlines.length===1?'':'s')+' in '+data.sensor:'no aircraft reported by '+(data.sensor||'the sensor'))
+      +(data.fetched?', '+data.fetched+' fetched':'');}
+  logoAirEl.innerHTML='';
+  for(var i=0;i<data.airlines.length;i++){
+    var a=data.airlines[i],row=document.createElement('div');row.className='row';
+    row.innerHTML='<div class="dash-top"><strong>'+esc(a.name)+'</strong>'
+      +'<small>'+esc(a.code||'')+'</small></div><p class="hint">'+logoSource(a)+'</p>';
+    var button=document.createElement('button');button.className='secondary';
+    button.textContent=a.source==='yours'?'Replace this logo':'Give this airline a logo';
+    (function(name,code){button.onclick=function(){
+      logoNameEl.value=name||code;logoNameEl.focus();logoHintEl.textContent='';
+      if(code&&!name)logoNameEl.value=code}}(a.name,a.code));
+    row.append(button);logoAirEl.append(row);
+  }
+  logoListEl.innerHTML='';
+  if(!data.files.length){
+    logoListEl.innerHTML='<p class="hint">Nothing here yet: every logo on the displays comes from '
+      +'Flightradar24. Drop a file in, or add one above.</p>';return}
+  for(var j=0;j<data.files.length;j++){
+    var file=data.files[j],line=document.createElement('div');line.className='row logo-row';
+    line.innerHTML=(file.thumb?'<img class="logo-thumb" alt="" src="'+file.thumb+'">':'')
+      +'<div class="logo-grow"><div class="dash-top"><strong>'+esc(file.file)+'</strong>'
+      +'<small>'+kbytes(file.bytes)+'</small></div><p class="hint">'+logoNote(file)+'</p></div>';
+    var del=document.createElement('button');del.className='danger';del.textContent='Delete';
+    (function(btn,name){btn.onclick=function(){
+      if(!btn.dataset.armed){btn.dataset.armed='1';btn.textContent='Really delete?';
+        setTimeout(function(){if(btn.isConnected&&btn.dataset.armed){btn.dataset.armed='';btn.textContent='Delete'}},3000);
+        return}
+      request('/api/logos/'+encodeURIComponent(name),{method:'DELETE'}).then(function(){
+        showToast('Deleted '+name);loadLogos()}).catch(function(e){logoHintEl.textContent=e.message})
+    }}(del,file.file));
+    line.append(del);logoListEl.append(line);
+  }
+}
+document.querySelector('#logo-save').onclick=async function(){
+  var who=logoNameEl.value.trim(),file=logoFileEl.files[0];
+  logoHintEl.textContent='';
+  if(!who){logoHintEl.textContent='Give the airline name or its code.';return}
+  if(!file){logoHintEl.textContent='Choose an image file.';return}
+  var body={data:''};
+  if(/^[A-Za-z0-9]{2,4}$/.test(who))body.code=who;else body.airline=who;
+  try{
+    body.data=await new Promise(function(resolve,reject){
+      var reader=new FileReader();reader.onload=function(){resolve(reader.result)};
+      reader.onerror=function(){reject(Error('Could not read that file.'))};
+      reader.readAsDataURL(file)});
+    var saved=await request('/api/logos',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    showToast('Saved '+saved.file);logoFileEl.value='';logoHintEl.textContent='';
+    loadLogos();
+  }catch(e){logoHintEl.textContent=e.message}
+};
+document.querySelector('#logo-dir-copy').onclick=async function(){
+  var btn=this,text=btn.dataset.copy||'';
+  try{await navigator.clipboard.writeText(text)}
+  catch(e){var ta=document.createElement('textarea');ta.value=text;document.body.append(ta);
+    ta.select();document.execCommand('copy');ta.remove()}
+  btn.textContent='✓';setTimeout(function(){btn.textContent='⧉'},1200)};
+loadSensors();load();loadLogos();
 </script></body></html>"""
 
 
@@ -1704,6 +2289,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"options": options(), "defaults": DEFAULTS,
                                    "default_entity": default_entity(),
                                    "supervisor_token": bool(SUPERVISOR_TOKEN)})
+        if path == "/api/logos":
+            return self.send_json(logo_report())
         match = re.fullmatch(r"/display/([A-Za-z0-9-]+)", path)
         if match:
             display = self.find_display(match.group(1))
@@ -1749,6 +2336,12 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as error:
                 return self.send_json({"error": str(error)}, 400)
             return self.preview(display)
+        if path == "/api/logos":
+            try:
+                saved = logo_upload(self.read_body())
+            except ValueError as error:
+                return self.send_json({"error": str(error)}, 400)
+            return self.send_json(saved, 201)
         return self.send_json({"error": "Not found"}, 404)
 
     def do_PUT(self):
@@ -1772,6 +2365,14 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return self.deny()
         match = re.fullmatch(r"/api/displays/([A-Za-z0-9-]+)", self.path_only)
+        if not match:
+            match = re.fullmatch(r"/api/logos/([^/]+)", self.path_only)
+            if match:
+                try:
+                    removed = logo_delete(unquote(match.group(1)))
+                except ValueError as error:
+                    return self.send_json({"error": str(error)}, 400)
+                return self.send_json(removed)
         if not match:
             return self.send_json({"error": "Not found"}, 404)
         remaining = [item for item in load_displays() if item.get("id") != match.group(1)]
