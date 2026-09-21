@@ -130,11 +130,7 @@
   :root{--ds:1}
   #acdetail{position:fixed;inset:0;display:none;flex-direction:column;
     align-items:center;justify-content:center;text-align:center;
-    /* The bottom padding is not decoration: the centred block is tall, and on a
-       wide-and-short kiosk (1920x1080) it reached the credit line and printed
-       through it. Reserving the footer band in the padding keeps the two apart
-       at every aspect ratio. */
-    padding:4vmin 4vmin 12vmin;box-sizing:border-box;overflow:hidden;
+    padding:4vmin;box-sizing:border-box;overflow:hidden;
     background:
       radial-gradient(120% 120% at 50% 45%, rgba(56,189,248,.08) 0%, rgba(5,8,15,0) 60%),
       linear-gradient(180deg,#070c16 0%,#04070d 60%,#03050a 100%)}
@@ -171,15 +167,18 @@
   /* The source art has a different viewBox (and aspect) per icon, so the icon  */
   /* is given a square box and `preserveAspectRatio` centres it inside.         */
   #acdetail .ad-schematic svg{height:100%;width:calc(44vmin * var(--ds));display:block}
-  #acdetail .ad-type{font-size:calc(3.4vmin * var(--ds));color:#dbeafe;
+  /* Aircraft type and altitude: the type is the interesting line, so it is the
+     larger of the two and the altitude (which the schematic and the trend already
+     imply is "up there") is smaller. Neither competes with the flight number. */
+  #acdetail .ad-type{font-size:calc(4.8vmin * var(--ds));color:#eaf4ff;
     letter-spacing:.02em}
   #acdetail .ad-type .ad-code{color:#8fb6d4;margin-left:1.4vmin;
-    font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.8em}
-  #acdetail .ad-alt{font-size:calc(6vmin * var(--ds));color:#ffffff;font-weight:600;
+    font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.78em}
+  #acdetail .ad-alt{font-size:calc(4vmin * var(--ds));color:#dcebf8;font-weight:600;
     font-family:ui-monospace,Menlo,Consolas,monospace;
     text-shadow:0 0 3vmin rgba(125,211,252,.3)}
-  #acdetail .ad-alt .ad-alt-label{display:block;font-size:calc(1.8vmin * var(--ds));
-    font-weight:400;letter-spacing:.3em;color:#8fb6d4;margin-bottom:.9vmin}
+  #acdetail .ad-alt .ad-alt-label{display:block;font-size:calc(1.7vmin * var(--ds));
+    font-weight:400;letter-spacing:.3em;color:#8fb6d4;margin-bottom:.7vmin}
   #acdetail .ad-route{display:flex;align-items:center;justify-content:center;
     gap:2vmin;flex-wrap:wrap;margin-top:1vmin}
   #acdetail .ad-end{min-width:22vmin}
@@ -188,10 +187,6 @@
   #acdetail .ad-end .ad-city{display:block;font-size:calc(2.3vmin * var(--ds));
     color:#a8cde8;margin-top:.6vmin}
   #acdetail .ad-arrow{font-size:calc(4.6vmin * var(--ds));color:#7dd3fc}
-  #acdetail .ad-foot{position:absolute;left:0;right:0;bottom:2.4vmin;text-align:center;
-    font-size:calc(1.6vmin * var(--ds));color:#8fb6d4;
-    font-family:ui-monospace,Menlo,Consolas,monospace;line-height:1.7}
-  #acdetail .ad-foot a{color:#8fb6d4}
   #acdetail .ad-empty{font-size:calc(3vmin * var(--ds));letter-spacing:.28em;color:#dcecf8}
   /* Several of these boxes are flex containers, and an author `display:flex`
      beats the user-agent `[hidden]{display:none}` — so hiding one would do
@@ -241,10 +236,6 @@
       <div class="ad-end ad-to"><span class="ad-code"></span><span class="ad-city"></span></div>
     </div>
     <div class="ad-empty" hidden>NO AIRCRAFT IN THE AREA</div>
-  </div>
-  <div class="ad-foot">
-    <div>Flightradar24 via Home Assistant</div>
-    <div>Aircraft icons by ADS-B Radar — <a href="https://adsb-radar.com" rel="noopener">adsb-radar.com</a></div>
   </div>
 </div>
 <script>
@@ -396,6 +387,7 @@
       badge: acdetail.querySelector('.ad-badge'),
       badgeLogo: acdetail.querySelector('.ad-logo'),
       badgeText: acdetail.querySelector('.ad-monogram'),
+      airlineText: acdetail.querySelector('.ad-airline-text'),
       airlineName: acdetail.querySelector('.ad-airline-name'),
       flight: acdetail.querySelector('.ad-flight'),
       schematic: acdetail.querySelector('.ad-schematic'),
@@ -455,6 +447,9 @@
       el.badge.className = 'ad-badge';
       el.badge.style.background = 'hsl(' + airlineHue(code || airlineName) + ',72%,66%)';
     }
+    // The logo says who the airline is; the name beside it is then the same
+    // information twice, so it only appears when the badge is a bare code.
+    el.airlineText.hidden = !!logo;
     el.airlineName.textContent = airlineName;
 
     el.flight.textContent = text(flight.flight || flight.name, 'Unknown');

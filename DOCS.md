@@ -119,14 +119,21 @@ the sky fills up again.
 
 One aircraft, the whole screen, refreshed on the same interval as the radar:
 
-* **the airline** — its own **logo** on a light plate, with the airline name beside it, when the
-  display's *Airline logo* setting is on; otherwise the airline's two-letter code on a coloured
-  square. See "Airline logos" below for where the logo comes from and what happens when it cannot
-  be fetched (the code badge: never a broken image);
+* **the airline** — its own **logo** on a light plate when the display's *Airline logo* setting is
+  on, and then nothing else: the logo already says who the airline is, so the name only appears when
+  the badge is a bare code (setting off, logo not fetched yet, or the airline has no logo file). See
+  "Airline logos" below;
 * **the flight number** (`flight_number`, falling back to the callsign);
 * **a top-down schematic of the aircraft type** (below);
-* **the altitude**, in the display's units — or `ON THE GROUND` for a taxiing aircraft;
+* **the aircraft type** as text (`aircraft_model` with the ICAO code beside it) — the largest line
+  under the schematic;
+* **the altitude**, in the display's units, smaller than the type — or `ON THE GROUND` for a taxiing
+  aircraft;
 * **origin → destination**, IATA codes with the city underneath.
+
+The dashboard has **no footer and no credit line**: it is the whole screen for one aircraft. (The
+radar keeps its own `Flightradar24 via Home Assistant` credit line, and the attribution the icon
+licence asks for lives in the docs and the admin page — see "Aircraft icons".)
 
 Which aircraft it shows: the **closest** one (by distance from the display's centre) — unless it was
 opened by a tap, in which case it follows that aircraft until it leaves the area. The radar's sort
@@ -228,7 +235,9 @@ airline logos and photographs, neither of which answers "what does an A321 look 
 > <https://apps.apple.com/app/id1538149835>
 >
 > Free for personal and commercial use; the requirement is the backlink above, which lives in
-> `README.md`, in this file, on the app's own admin page and in both displays' credit line.
+> `README.md`, in this file and on the app's own admin page. The **radar** display's credit line is
+> unchanged (`Flightradar24 via Home Assistant`); the dashboard has none, deliberately — a
+> full-screen dashboard with a footer is the thing this was asked to stop being.
 
 * Artwork: `vendor/adsb-radar/*.svg` (unmodified, with the package's own readme), plus a note in
   `vendor/adsb-radar/README.md` on why this set and what the licence requires.
@@ -279,11 +288,13 @@ touched the internet at all; the payload then carries no logo bytes whatsoever.
 **Why the light plate:** the logos are the airlines' own wordmarks, and several of them (British
 Airways, American, Air France) are dark navy — on a night-sky background they would be nearly
 invisible. They sit on a soft off-white plate, which is also what the coloured code badge became, so
-the two fallbacks are visually the same object.
+the two fallbacks are visually the same object. Because the logo *is* the airline's identity, the
+name beside it is hidden while a logo is shown — it comes back automatically when the badge is only
+a code.
 
 **Trademark note:** these are the airlines' own marks, published by Flightradar24 alongside its
-data, used here for a personal non-commercial display that credits Flightradar24 in its footer. If
-you ever republish this app for others, that is the part to re-check first.
+data, used here for a personal non-commercial display (the radar view credits Flightradar24 in its
+footer). If you ever republish this app for others, that is the part to re-check first.
 
 ## Troubleshooting
 

@@ -13,7 +13,7 @@ It has two full-screen views, from one display and one settings set:
   origin → destination. It can *be* the display (standalone), or the radar can switch to it
   automatically when only one aircraft is left, or when an aircraft is tapped.
 
-> **Status: v0.2.1 — the dashboard and the airline logos were added and verified against live
+> **Status: v0.2.2 — the dashboard and the airline logos were added and verified against live
 > traffic; the v0.1.x radar behaviour is unchanged.**
 
 ## Start here
@@ -33,11 +33,11 @@ It has two full-screen views, from one display and one settings set:
 
 The aircraft schematics are **not** mine and are not free-floating: they come from
 [ADS-B Radar for macOS](https://adsb-radar.com) (37 top-down aircraft silhouettes, free for
-personal and commercial use in exchange for a backlink), the same terms are repeated in
-`vendor/adsb-radar/README.md`, `DOCS.md`, the app's admin page and the credit line of both
-views. Nothing else in this repo is third-party artwork — the airline logos are fetched at
-runtime, by the app, from Flightradar24's own operator set, and are the airlines' marks (see
-"Airline logos" in `DOCS.md`).
+personal and commercial use in exchange for a backlink), and that backlink is repeated in
+`vendor/adsb-radar/README.md`, `DOCS.md` and the app's own admin page — the radar display keeps its
+`Flightradar24 via Home Assistant` credit line, and the dashboard has no footer at all (asked for).
+The airline logos are fetched at runtime, by the app, from Flightradar24's own operator set,
+and are the airlines' marks (see "Airline logos" in `DOCS.md`).
 
 ## Verified
 
@@ -60,17 +60,21 @@ runtime, by the app, from Flightradar24's own operator set, and are the airlines
   (1920×1080, 1080×1920 and the admin modal; 23 assertions, all passing): the standalone
   dashboard renders with the radar hidden, every field populated from real traffic
   (`EI725 / Airbus A320-251N / 777 m / LHR London → ORK Cork`, badge `EI`), the schematic is a
-  real SVG drawing sized inside the viewport, the credit line carries the required attribution,
-  the size slider scales every size by exactly 2.00×, and nothing throws in the page.
+  real SVG drawing sized inside the viewport, and the size slider scales every size by exactly
+  2.00×. The dashboard carries **no** credit line and **no** airline name when a logo is present
+  (both asked for, both asserted), and it fits the screen at 1920×1080 and 1080×1920 now that
+  nothing is reserved at the bottom.
 * **The three ways in were each exercised**, not just wired up: auto mode stays on the radar with
   281 aircraft in the area and switches to the dashboard when the same live payload is one
   aircraft (fixture = the live payload truncated, marked as such); a **real mouse click** on a
   label opens the dashboard for *that* aircraft (asserted against the payload's own flight number
   for the tapped callsign); a click on the dashboard returns to the radar; and a display pointed at
   a non-existent sensor shows the reason **on the dashboard** instead of a blank screen.
-* **The layout collision that a screenshot caught**: in landscape the centred block reached the
-  credit line and printed through it (content ended at 952 px, credit started at 995 px after the
-  fix, in portrait 1372/1835) — now asserted as a rectangle test at both aspect ratios.
+* **The layout collision that a screenshot caught** (v0.2.0, when the dashboard still had a credit
+  line): in landscape the centred block reached the footer and printed through it. It was fixed by
+  reserving the footer band, and asserted as a rectangle test at both aspect ratios; v0.2.2 removed
+  the footer altogether, so the assertion became "the block fits the screen, and there is no credit
+  line".
 * **A silent JS error was found and fixed by this exercise**: the dashboard's DOM helper was named
   `detailRows`, which the radar already used for its bottom strip — the later declaration wins at
   *every* call site, so the dashboard called the strip's version with no aircraft and threw on

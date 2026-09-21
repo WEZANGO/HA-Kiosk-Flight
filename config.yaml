@@ -1,5 +1,5 @@
 name: Kiosk Flight Displays
-version: 0.2.1
+version: 0.2.2
 slug: kiosk_flight_displays
 description: Full-screen kiosk displays of the aircraft flying over your house, read from Home Assistant's Flightradar24 integration.
 url: https://github.com/example/kiosk-flight-displays

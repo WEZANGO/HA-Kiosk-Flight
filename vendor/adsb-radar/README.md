@@ -13,9 +13,12 @@ License, verbatim from the package's `Readme and Attribution.rtf`:
 > Icons by ADS-B Radar for macOS - https://adsb-radar.com - https://apps.apple.com/app/id1538149835
 
 **Where the required backlink lives in this repo:** `README.md` ("Aircraft icons"),
-`DOCS.md` ("Aircraft icons and the single-aircraft dashboard") and the credit line of both
-the radar display and the single-aircraft dashboard, which print
-`Aircraft icons: ADS-B Radar (adsb-radar.com)`.
+`DOCS.md` ("Aircraft icons and the single-aircraft dashboard"), this file, and the app's own
+admin page (a hint line under its header). The **radar** display's credit line stays as it was
+(`Flightradar24 via Home Assistant`).
+
+Note: the single-aircraft dashboard has **no** credit line — that was asked for, to keep the
+full-screen view clean — so the attribution must not be moved out of the four places above.
 
 ## Why these
 
