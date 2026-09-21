@@ -1455,7 +1455,7 @@ var route=function(p){return base+'/'+p.replace(/^\//,'')};
 var DIRECT_PORT='8096';
 var ACCESS_TOKEN='__ACCESS_TOKEN__';
 var directLink=function(p){return ACCESS_TOKEN
-  ? location.protocol+'//'+location.hostname+':'+DIRECT_PORT+route(p)+'?auth='+encodeURIComponent(ACCESS_TOKEN)
+  ? location.protocol+'//'+location.hostname+':'+DIRECT_PORT+p+'?auth='+encodeURIComponent(ACCESS_TOKEN)
   : ''};
 // Every admin fetch carries the token so the page also works on the direct URL.
 function withAuth(p){return p+(p.indexOf('?')>=0?'&':'?')+'auth='+encodeURIComponent(ACCESS_TOKEN)}
